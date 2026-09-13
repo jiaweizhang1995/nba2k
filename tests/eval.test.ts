@@ -281,7 +281,7 @@ describe("Eval run, determinism, replay, panels", () => {
 
     const detailA = getEvaluationDetail(evalA);
     expect(detailA.seasons).toHaveLength(3);
-    expect(detailA.evaluation.score?.version).toBe("GM-BENCH v2");
+    expect(detailA.evaluation.score?.version).toBe("GM-BENCH v3");
 
     // 相同种子第二次独立评测 → 结果一致
     const { id: evalB } = await createEvaluation({ name: "3年-B（同种子）", baseSaveId, teamShortId, seed: 20260913, years: 3, provider: "STUB" });
@@ -311,9 +311,9 @@ describe("Eval run, determinism, replay, panels", () => {
       await runToCompletion(id);
       const d = getEvaluationDetail(id);
       const sc = d.evaluation.score!;
-      expect(sc.version).toBe("GM-BENCH v2");
+      expect(sc.version).toBe("GM-BENCH v3");
       // 面板必备字段
-      for (const field of ["score", "totalWins", "playoffCount", "champCount", "tradeCount", "legalRate", "errorRate", "callCount", "latencyMsSum", "finalChemistry", "formula"] as const) {
+      for (const field of ["score", "totalWins", "playoffCount", "champCount", "tradeCount", "legalRate", "errorRate", "callCount", "latencyMsSum", "finalChemistry", "formula", "tradePnl", "tradeBonus", "draftBonus", "faValueBonus", "pickCapitalBonus"] as const) {
         expect(field in sc, `缺少字段 ${field}`).toBe(true);
       }
       expect(d.seasons.length).toBeLessThanOrEqual(years);

@@ -24,6 +24,7 @@ import {
   teams as teamsT,
 } from "@/db/schema";
 import { capSnapshot, seasonMoney } from "@/domain/salary";
+import { pickValue } from "@/domain/trade";
 import { askingSalaryFor, isRestrictedFa } from "@/domain/freeagency";
 import { providerChat, STAGE_ALLOWED_ACTIONS, type GmAction } from "@/lib/eval-provider";
 import { decryptKey, encryptKey, maskKey } from "@/lib/eval-crypto";
@@ -61,7 +62,7 @@ const now = () => new Date().toISOString();
 const shortId = (full: string) => full.split(":").slice(1).join(":");
 const MAX_TURNS = 600;
 
-export const SCORE_VERSION = "GM-BENCH v2";
+export const SCORE_VERSION = "GM-BENCH v3";
 
 export class EvalError extends Error {
   code: string;
@@ -1130,7 +1131,81 @@ export function finishEvaluation(id: string): StepOutcome {
   const rosterValueDelta = rosterValueStart != null ? Math.round((rosterValueEnd - rosterValueStart) * 10) / 10 : null;
   const rosterBonus = rosterValueDelta != null ? Math.max(-20, Math.min(20, rosterValueDelta * 0.4)) : 0;
 
-  // GM-BENCH v2：版本化公式（改动必须升版本）。新增阵容净值变化项。
+  // --- Process metrics (GM-BENCH v3): results alone reward lucky rings and
+  // passive inheritance. These measure whether the GM actually MADE value.
+
+  // Trade P&L: aiFeedback.valueDelta is each AI counterparty's net gain —
+  // trades are zero-sum, so the user's take is its negation. Positive = the
+  // GM consistently won negotiations (sold high, bought low).
+  let tradePnl = 0;
+  for (const e of userTrades) {
+    const fb = ((e.payload as { aiFeedback?: { valueDelta?: number }[] } | null)?.aiFeedback) ?? [];
+    tradePnl -= fb.reduce((a, f) => a + (f.valueDelta ?? 0), 0);
+  }
+  const tradeBonus = Math.max(-15, Math.min(15, tradePnl * 0.15));
+
+  // Draft record: for every pick the user exercised, did the selection beat
+  // its slot's expectation? Value found late counts as much as value at #1.
+  const evalSeasonSet = new Set(seasons.map((s) => s.season));
+  const userPicks = db
+    .select()
+    .from(picksT)
+    .where(and(eq(picksT.saveId, evalRow.saveId), eq(picksT.holderTeamId, evalRow.teamFullId), eq(picksT.status, "EXERCISED")))
+    .all()
+    .filter((pk) => evalSeasonSet.has(pk.year));
+  let draftBonus = 0;
+  for (const pk of userPicks) {
+    const pickNum = parseInt(pk.resolved ?? "", 10);
+    if (!Number.isFinite(pickNum)) continue;
+    const drafted = db
+      .select()
+      .from(playersT)
+      .where(and(eq(playersT.saveId, evalRow.saveId), eq(playersT.draftYear, pk.year), eq(playersT.draftPick, pickNum)))
+      .get();
+    if (!drafted) continue;
+    const expected = pickNum <= 5 ? 80 : pickNum <= 14 ? 77 : pickNum <= 30 ? 74 : 70;
+    draftBonus += Math.max(-3, Math.min(3, (drafted.ratings.overall - expected) / 4));
+  }
+  draftBonus = Math.max(-10, Math.min(10, draftBonus));
+
+  // Signing efficiency: end-state overall vs what the contract's price tier
+  // expected. Steals and overpays are symmetric.
+  const userSigns = db
+    .select()
+    .from(faOffersT)
+    .where(and(eq(faOffersT.saveId, evalRow.saveId), eq(faOffersT.teamId, evalRow.teamFullId), eq(faOffersT.status, "ACCEPTED")))
+    .all();
+  let faValueBonus = 0;
+  for (const o of userSigns) {
+    const p = db.select().from(playersT).where(eq(playersT.id, o.playerId)).get();
+    if (!p) continue;
+    const expected = o.avgSalary >= 25 ? 84 : o.avgSalary >= 10 ? 78 : o.avgSalary >= 3 ? 72 : 66;
+    faValueBonus += Math.max(-3, Math.min(3, (p.ratings.overall - expected) / 4));
+  }
+  faValueBonus = Math.max(-10, Math.min(10, faValueBonus));
+
+  // Pick capital: draft-pick value held now vs what the franchise started
+  // with — stockpiling the future is a real GM skill.
+  const pickStock = (sid: string, fullId: string) =>
+    db
+      .select()
+      .from(picksT)
+      .where(and(eq(picksT.saveId, sid), eq(picksT.holderTeamId, fullId), eq(picksT.status, "OWNED")))
+      .all()
+      .reduce(
+        (a, pk) =>
+          a +
+          pickValue(
+            { id: pk.id, year: pk.year, round: pk.round, protection: pk.protection ?? null, holderTeamId: pk.holderTeamId, originalTeamId: pk.originalTeamId, status: pk.status },
+            seasons[seasons.length - 1]?.season ?? 2027,
+          ).value,
+        0,
+      );
+  const baseTeamFull = baseSave ? `${evalRow.baseSaveId}:${evalRow.teamShortId}` : null;
+  const pickCapitalDelta = baseTeamFull ? pickStock(evalRow.saveId, evalRow.teamFullId) - pickStock(evalRow.baseSaveId, baseTeamFull) : 0;
+  const pickCapitalBonus = Math.max(-6, Math.min(6, pickCapitalDelta * 0.08));
+
+  // GM-BENCH v3：过程分——交易盈亏/选秀命中/签约性价比/选秀权资产，与结果分并列。
   const score = Math.round(
     winsPerSeason * 1.2 +
       playoffCount * 6 +
@@ -1139,7 +1214,11 @@ export function finishEvaluation(id: string): StepOutcome {
       legalRate * 20 -
       errorRate * 15 +
       (chemistry - 60) * 0.15 +
-      rosterBonus,
+      rosterBonus +
+      tradeBonus +
+      draftBonus +
+      faValueBonus +
+      pickCapitalBonus,
   );
 
   const scoreJson = {
@@ -1170,7 +1249,14 @@ export function finishEvaluation(id: string): StepOutcome {
     rosterValueEnd,
     rosterValueDelta,
     rosterBonus: Math.round(rosterBonus * 10) / 10,
-    formula: "score = winsPerSeason*1.2 + playoffs*6 + finals*8 + champs*25 + legalRate*20 - errorRate*15 + (chem-60)*0.15 + clamp(rosterValueDelta*0.4, -20, 20)",
+    tradePnl: Math.round(tradePnl * 10) / 10,
+    tradeBonus: Math.round(tradeBonus * 10) / 10,
+    draftBonus: Math.round(draftBonus * 10) / 10,
+    faValueBonus: Math.round(faValueBonus * 10) / 10,
+    pickCapitalDelta: Math.round(pickCapitalDelta * 10) / 10,
+    pickCapitalBonus: Math.round(pickCapitalBonus * 10) / 10,
+    formula:
+      "score = winsPerSeason*1.2 + playoffs*6 + finals*8 + champs*25 + legalRate*20 - errorRate*15 + (chem-60)*0.15 + clamp(rosterValueDelta*0.4,±20) + clamp(tradePnl*0.15,±15) + clamp(Σ(draftedOvr-slotExpect)/4,±10) + clamp(Σ(signedOvr-salaryExpect)/4,±10) + clamp(pickCapitalDelta*0.08,±6)",
   };
 
   db.update(evaluationsT)
