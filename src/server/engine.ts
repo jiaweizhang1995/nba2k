@@ -605,6 +605,16 @@ export function advanceSim(saveId: string, mode: AdvanceMode, marketDiag?: Recor
     result.injuries.push(...report.injuries);
     result.notes.push(...report.notes);
     playedGameIds.push(...report.results.map((r) => r.gameId));
+    if (state.phase === "FREE_AGENCY") {
+      // The market churns while the GM deliberates — flush today's state,
+      // run a day of AI signings, reload so signings stick.
+      persistState(state);
+      const n = runAiFreeAgencyDay(saveId, report.date);
+      if (n > 0) {
+        result.notes.push(`自由市场动态：AI 球队今日签下 ${n} 人`);
+        state = loadLeagueState(saveId);
+      }
+    }
     if (!deadlineDone && state.phase === "REGULAR_SEASON" && report.date >= deadlineDate) {
       persistState(state);
       const n = runAiTradeMarket(saveId, marketDiag, { deadline: true });
@@ -1780,6 +1790,137 @@ export function respondInboundOffer(saveId: string, offerId: string, accept: boo
   return { accepted: false as const, reason: "执行失败" };
 }
 
+// ---------------------------------------------------------------------------
+// AI free-agency churn: while the user's FA window is open, the market moves.
+// Stars get snapped up in the first days of July; waiting to lowball costs you
+// the player. Deterministic per (seed, season, date).
+// ---------------------------------------------------------------------------
+
+const AI_MLE = 12.8;
+const AI_ROSTER_TARGET = 15;
+const AI_APRON_FILLER_MAX = 74; // above the second apron only low-tier players take the minimum
+
+type FaRow = typeof playersT.$inferSelect;
+
+/** One AI team's shot at one free agent at honest market value. */
+function aiTrySignFreeAgent(
+  q: Pick<ReturnType<typeof getDb>, "select" | "update">,
+  saveId: string,
+  season: number,
+  teamFullId: string,
+  c: FaRow,
+  opts: { mleUsed: boolean; targetRoster: number },
+): { usedMle: boolean } | null {
+  const roster = q
+    .select()
+    .from(playersT)
+    .where(and(eq(playersT.saveId, saveId), eq(playersT.teamId, teamFullId)))
+    .all()
+    .filter((p) => p.status === "ACTIVE" || p.status === "INJURED");
+  if (roster.length >= opts.targetRoster) return null;
+  const asking = askingSalaryFor(c.contract, c.yearsPro, c.ratings.overall, c.age);
+  const offer = suggestedContract(
+    {
+      id: c.id,
+      name: c.name,
+      position: c.position,
+      age: c.age,
+      ratings: { overall: c.ratings.overall, potential: c.ratings.potential },
+      status: "FREE_AGENT",
+      askingSalary: asking,
+      askingYears: Math.max(1, Math.min(4, c.age >= 32 ? 2 : 4)),
+      contract: c.contract,
+    },
+    season,
+  );
+  const snap = capSnapshot(roster, roster.length);
+  let salary: number | null = null;
+  if (!snap.overCap) salary = Math.min(offer.avgSalary, snap.capSpace);
+  else if (!snap.overSecondApron && !opts.mleUsed) salary = Math.min(offer.avgSalary, AI_MLE);
+  else if (c.ratings.overall < AI_APRON_FILLER_MAX) salary = CBA.minimumSalary;
+  if (salary == null || salary < CBA.minimumSalary) return null;
+  // Money floor (same rule the user's offers face): a player with a market
+  // doesn't take <88% of his ask because it's all the room a team has left.
+  if (salary < asking * 0.88 && salary > CBA.minimumSalary + 0.01) return null;
+  const years = Math.max(1, Math.min(CBA.maxContractYears, c.age >= 32 ? 2 : 3));
+  q.update(playersT)
+    .set({
+      teamId: teamFullId,
+      lastTeamId: teamFullId,
+      status: "ACTIVE",
+      role: "BENCH",
+      contract: {
+        type: salary >= 30 ? "MAX" : salary <= CBA.minimumSalary + 0.01 ? "MINIMUM" : "VETERAN",
+        years: Array.from({ length: years }, (_, i) => ({ season: season + i, salary: round2(salary) })),
+        birdRights: false,
+        noTrade: false,
+        option: null,
+        signedSeason: season,
+      },
+    })
+    .where(eq(playersT.id, c.id))
+    .run();
+  return { usedMle: snap.overCap && salary > CBA.minimumSalary + 0.01 };
+}
+
+/** One day of AI free-agency signings while the user's window is open. */
+function runAiFreeAgencyDay(saveId: string, date: string): number {
+  const db = getDb();
+  const save = getSave(saveId);
+  if (!save || save.phase !== "FREE_AGENCY") return 0;
+  const ps = getPhaseState(saveId);
+  const userFull = (ps.userTeamId as string | undefined) ?? null;
+  const mleKey = `faMleUsed:${save.season}`;
+  const mleUsed = new Set<string>((ps[mleKey] as string[] | undefined) ?? []);
+  const rng = rngFor(save.seed, `fa-churn:${save.season}:${date}`);
+
+  const aiTeamIds = db
+    .select()
+    .from(teamsT)
+    .where(eq(teamsT.saveId, saveId))
+    .all()
+    .filter((t) => t.id !== userFull)
+    .map((t) => t.id);
+  const pool = db
+    .select()
+    .from(playersT)
+    .where(and(eq(playersT.saveId, saveId), eq(playersT.status, "FREE_AGENT")))
+    .all()
+    .filter((p) => p.teamId === null)
+    .sort((a, b) => b.ratings.overall - a.ratings.overall);
+  if (!pool.length || !aiTeamIds.length) return 0;
+
+  let signed = 0;
+  const MAX_SIGNINGS_PER_DAY = 4;
+  for (const c of pool) {
+    if (signed >= MAX_SIGNINGS_PER_DAY) break;
+    // Signing speed scales with talent: stars go early in July, minimum-tier
+    // bodies linger into camp — like the real market.
+    const chance = Math.min(0.85, Math.max(0.03, (c.ratings.overall - 62) * 0.05));
+    if (!rng.chance(chance)) continue;
+    // Suitors in a deterministic shuffle; first affordable team lands him.
+    const suitors = [...aiTeamIds].sort(() => rng.float(0, 1) - rng.float(0, 1));
+    for (const teamId of suitors) {
+      const res = aiTrySignFreeAgent(db, saveId, save.season, teamId, c, {
+        mleUsed: mleUsed.has(teamId),
+        targetRoster: AI_ROSTER_TARGET,
+      });
+      if (!res) continue;
+      if (res.usedMle) mleUsed.add(teamId);
+      signed++;
+      logEvent(saveId, "FA", `${c.name} 以 ${res.usedMle ? "中产" : "市场"}价签约（${shortId(teamId)}）`, { playerId: c.id, teamId });
+      break;
+    }
+  }
+  if (signed > 0) {
+    db.update(saves)
+      .set({ phaseState: { ...getPhaseState(saveId), [mleKey]: [...mleUsed] } as never, updatedAt: now() })
+      .where(eq(saves.id, saveId))
+      .run();
+  }
+  return signed;
+}
+
 /** Start the next regular season. */
 export function startNewSeason(saveId: string) {
   const db = getDb();
@@ -1871,18 +2012,13 @@ export function startNewSeason(saveId: string) {
     // space first, then the mid-level, and only low-tier players take the
     // minimum. Stars that nobody can afford stay unsigned instead of being
     // sniped for 1.2M. 15-man rosters also keep the trade market fluid.
-    const AI_ROSTER_TARGET = 15;
-    const MLE = 12.8;
-    const APRON_FILLER_MAX = 74; // above the second apron only low-tier players take the minimum
+    // MLE usage from the daily churn carries over — it's one per offseason.
+    const faMleKey = `faMleUsed:${save.season}`;
+    const faMleUsed = new Set<string>((getPhaseState(saveId)[faMleKey] as string[] | undefined) ?? []);
     const aiTeams = tx.select().from(teamsT).where(eq(teamsT.saveId, saveId)).all().filter((t) => t.id !== userTeamFullId);
     let aiSigned = 0;
     for (const t of aiTeams) {
-      // One mid-level exception per offseason — over-cap teams can't spam
-      // MLE-sized deals (real rule: the MLE is a single annual exception).
-      let mleUsed = false;
       for (;;) {
-        const roster = tx.select().from(playersT).where(and(eq(playersT.saveId, saveId), eq(playersT.teamId, t.id))).all();
-        if (roster.length >= AI_ROSTER_TARGET) break;
         const pool = tx
           .select()
           .from(playersT)
@@ -1891,48 +2027,14 @@ export function startNewSeason(saveId: string) {
           .filter((p) => p.teamId === null)
           .sort((a, b) => b.ratings.overall - a.ratings.overall);
         if (!pool.length) break;
-        const snap = capSnapshot(roster, roster.length);
         let signed = false;
         for (const c of pool) {
-          const asking = askingSalaryFor(c.contract, c.yearsPro, c.ratings.overall, c.age);
-          const offer = suggestedContract(
-            {
-              id: c.id,
-              name: c.name,
-              position: c.position,
-              age: c.age,
-              ratings: { overall: c.ratings.overall, potential: c.ratings.potential },
-              status: "FREE_AGENT",
-              askingSalary: asking,
-              askingYears: Math.max(1, Math.min(4, c.age >= 32 ? 2 : 4)),
-              contract: c.contract,
-            },
-            save.season,
-          );
-          let salary: number | null = null;
-          if (!snap.overCap) salary = Math.min(offer.avgSalary, snap.capSpace);
-          else if (!snap.overSecondApron && !mleUsed) salary = Math.min(offer.avgSalary, MLE);
-          else if (c.ratings.overall < APRON_FILLER_MAX) salary = CBA.minimumSalary;
-          if (salary == null || salary < CBA.minimumSalary) continue;
-          const years = Math.max(1, Math.min(CBA.maxContractYears, c.age >= 32 ? 2 : 3));
-          tx.update(playersT)
-            .set({
-              teamId: t.id,
-              lastTeamId: t.id,
-              status: "ACTIVE",
-              role: "BENCH",
-              contract: {
-                type: salary >= 30 ? "MAX" : salary <= CBA.minimumSalary + 0.01 ? "MINIMUM" : "VETERAN",
-                years: Array.from({ length: years }, (_, i) => ({ season: save.season + i, salary: round2(salary) })),
-                birdRights: false,
-                noTrade: false,
-                option: null,
-                signedSeason: save.season,
-              },
-            })
-            .where(eq(playersT.id, c.id))
-            .run();
-          if (snap.overCap && salary > CBA.minimumSalary + 0.01) mleUsed = true;
+          const res = aiTrySignFreeAgent(tx, saveId, save.season, t.id, c, {
+            mleUsed: faMleUsed.has(t.id),
+            targetRoster: AI_ROSTER_TARGET,
+          });
+          if (!res) continue;
+          if (res.usedMle) faMleUsed.add(t.id);
           signed = true;
           aiSigned++;
           break;
@@ -1941,6 +2043,10 @@ export function startNewSeason(saveId: string) {
       }
     }
     if (aiSigned > 0) {
+      tx.update(saves)
+        .set({ phaseState: { ...getPhaseState(saveId), [faMleKey]: [...faMleUsed] } as never, updatedAt: now() })
+        .where(eq(saves.id, saveId))
+        .run();
       logEvent(saveId, "FA", `自由市场收官：AI 球队按市场价补强 ${aiSigned} 人次`, { signings: aiSigned });
     }
 

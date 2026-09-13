@@ -80,25 +80,40 @@ export function evaluateOffer(
   const reasons: string[] = [];
   const { firstYear } = maxContractValue(player.age < 25 ? 0 : player.age < 33 ? 8 : 17, 1);
   const moneyRatio = offer.avgSalary / Math.max(0.5, player.askingSalary);
-  let interest = 40 + moneyRatio * 35;
-  if (offer.avgSalary >= firstYear * 0.95) interest += 10;
+
+  // 金钱是第一道门：市场定价不是装饰品。低于要价 ~12% 以上，球员几乎
+  // 一定拒绝——除非市场冷清（没有竞争者时他才会打折）。这堵死了"球星
+  // 稳定七五折签约"的漏洞：有市场的球员总能拿到接近要价。
+  const coldMarket = competitorInterest < 25;
+  const moneyFloor = coldMarket ? 0.75 : 0.88;
+  if (moneyRatio < moneyFloor) {
+    reasons.push(
+      `报价 ${offer.avgSalary.toFixed(1)}M/年 远低于要价 ${player.askingSalary.toFixed(1)}M/年（底线 ${(moneyFloor * 100).toFixed(0)}%），被直接拒绝`,
+    );
+    return { interest: 10, accept: false, reasons };
+  }
+
+  let interest = 12 + moneyRatio * 55;
+  if (moneyRatio >= 1.0) interest += 12;
+  else if (moneyRatio >= 0.95) interest += 6;
+  if (offer.avgSalary >= firstYear * 0.95) interest += 8;
   reasons.push(`报价 ${offer.avgSalary.toFixed(1)}M/年 vs 要价 ${player.askingSalary.toFixed(1)}M/年`);
 
   // Fit: how much the team needs his position
   const posCount = team.players.filter((p) => p.position === player.position).length;
-  const fit = Math.max(0, 18 - posCount * 6);
+  const fit = Math.max(0, 14 - posCount * 5);
   interest += fit;
   reasons.push(`球队同位置人数 ${posCount}，角色契合度加成 +${fit}`);
 
   // Team quality: contenders pay less but attract
   const teamQuality = team.players.reduce((a, p) => a + p.ratings.overall, 0) / Math.max(1, team.players.length);
-  interest += (teamQuality - 74) * 1.8;
+  interest += (teamQuality - 74) * 1.4;
   reasons.push(`球队实力评估 ${teamQuality.toFixed(0)} 分，影响加盟意愿`);
 
-  interest -= competitorInterest * 0.4;
+  interest -= competitorInterest * 0.35;
   if (competitorInterest > 0) reasons.push(`有其他球队竞争，抬高了签约门槛`);
 
-  interest += rng.float(-6, 6);
+  interest += rng.float(-5, 5);
   interest = Math.max(0, Math.min(100, interest));
   const accept = interest >= 62 && offer.years >= Math.min(player.askingYears, CBA.maxContractYears) * 0.6;
   return { interest: Math.round(interest), accept, reasons };

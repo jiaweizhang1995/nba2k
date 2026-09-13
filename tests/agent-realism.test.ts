@@ -19,8 +19,8 @@ import {
   waivePlayer,
 } from "@/server/engine";
 import { generateDraftClass } from "@/domain/draft";
-import { askingSalaryFor, canAfford } from "@/domain/freeagency";
-import { CBA, maxContractValue } from "@/domain/salary";
+import { askingSalaryFor, canAfford, evaluateOffer } from "@/domain/freeagency";
+import { CBA, maxContractValue, round2 } from "@/domain/salary";
 
 let saveId: string;
 let userShort: string;
@@ -214,6 +214,35 @@ describe("bird rights + cut-down day + AI league dynamics", () => {
   });
 });
 
+describe("live free-agency market", () => {
+  it("the FA pool churns while the user waits — stars sign first", async () => {
+    const s = await createSave({ name: "fa churn", seed: 555010 });
+    await advanceSim(s.saveId, "SEASON");
+    makeDraftPick(s.saveId, { simulateAll: true });
+    expect(getSave(s.saveId)!.phase).toBe("FREE_AGENCY");
+    const db = getDb();
+    const poolOf = () =>
+      db
+        .select()
+        .from(playersT)
+        .where(and(eq(playersT.saveId, s.saveId), eq(playersT.status, "FREE_AGENT")))
+        .all()
+        .filter((p) => p.teamId === null);
+    const before = poolOf();
+    const starsBefore = before.filter((p) => p.ratings.overall >= 78).length;
+    expect(before.length).toBeGreaterThan(10);
+    // One week of open market: AI teams must actually sign people.
+    await advanceSim(s.saveId, "WEEK");
+    const after = poolOf();
+    expect(after.length).toBeLessThan(before.length);
+    const starsAfter = after.filter((p) => p.ratings.overall >= 78).length;
+    expect(starsAfter).toBeLessThanOrEqual(starsBefore);
+    // Second week keeps churning — the market doesn't freeze for the user.
+    await advanceSim(s.saveId, "WEEK");
+    expect(poolOf().length).toBeLessThanOrEqual(after.length);
+  }, 300_000);
+});
+
 describe("mid-level exception is a single annual exception", () => {
   const mkTeam = (totalSalary: number): import("@/domain/trade").TradeTeam => ({
     id: "T", abbr: "T", players: Array.from({ length: 14 }, (_, i) => ({
@@ -251,6 +280,26 @@ describe("market-rate free agency pricing", () => {
     // rating 74 → 16% of max; old anchor decayed 50% → 25M vs rating ~7.7M.
     expect(ask).toBeLessThanOrEqual(26);
     expect(ask).toBeGreaterThanOrEqual(CBA.minimumSalary);
+  });
+
+  it("a star with a warm market refuses ~25%-below-ask lowballs", () => {
+    // Booker-at-31.85M regression: asking ~41.65M, warm competition, a 77%-of-
+    // ask offer used to sail through `interest >= 62`. Now it must fail.
+    const ask = askingSalaryFor(cheapRookieDeal, 11, 87, 30);
+    const fa = {
+      id: "p1", name: "Star", position: "SG", age: 30,
+      ratings: { overall: 87, potential: null }, status: "FREE_AGENT" as const,
+      askingSalary: ask, askingYears: 4, contract: cheapRookieDeal,
+    };
+    const mkP = (i: number) => ({
+      id: `t${i}`, name: `T${i}`, teamId: "T", position: i % 2 ? "PG" : "C", age: 27, yearsPro: 5,
+      ratings: { overall: 74, potential: null } as never, contract: cheapRookieDeal, status: "ACTIVE", role: "STARTER",
+    });
+    const team = { id: "T", abbr: "TST", players: [0, 1, 2, 3, 4].map(mkP), picks: [], aiPhase: "PLAYOFF" as const, aiRisk: 0.5 };
+    const lowball = evaluateOffer(fa, { years: 4, avgSalary: round2(ask * 0.77) }, team, 42, "t", 60);
+    expect(lowball.accept).toBe(false);
+    const fair = evaluateOffer(fa, { years: 4, avgSalary: ask }, team, 42, "t", 60);
+    expect(fair.accept).toBe(true);
   });
 });
 

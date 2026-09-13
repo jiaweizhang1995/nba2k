@@ -606,6 +606,7 @@ const SYSTEM_PROMPT = `你是篮球经理模拟游戏《HARDWOOD GM》中的球�
 - 自家合同到期的球员会进入自由市场（freeAgents[].fromMyTeam=true）。你持有鸟权：可超工资帽续约他们（上限为顶薪）；不续约则可能被其他球队签走。roster[].expiring 标记今夏到期者。
 - 休赛期阵容可到 20 人，但常规赛开打前必须裁到 18 人以内，否则 start_new_season 会被拒绝。
 - 工资帽规则：超帽只能用中产特例（≤12.8M/年，每个休赛期全队仅一次，cap.mleUsed 可查是否已用）或底薪（≤1.2M/年）；超第一土豪线失去中产，超第二土豪线只能底薪。
+- 自由市场是活的：每推进一天，AI 球队就会按市场价签人——好球员先被抢走，拖得越久池子越薄；报价远低于要价会被直接拒绝。
 - 裁员后剩余合同变为死钱仍占工资帽——裁大合同要三思。
 - roster[].morale 反映球员士气：输球文化和被埋没的天赋会让球星 UNHAPPY——不处理可能贬值甚至逼宫。
 - 交易在 SEASON/DRAFT/FREE_AGENCY 阶段均可提议，但常规赛交易窗口在 2 月 6 日截止日关闭（之后只能等到休赛期）；get_market 可查看全联盟各队的 phase（CONTENDER/PLAYOFF/BUBBLE/REBUILD）、薪资空间与核心球员，用于挑选交易对象。`;
@@ -901,7 +902,14 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
           // management (deadline trades, fatigue) is where real GM skill
           // shows. Playoffs still complete in one call; stage changes stop
           // the advance so the next observation is fresh.
-          const mode = saveNow.phase === "REGULAR_SEASON" ? "MONTH" : saveNow.phase === "PLAYOFFS" ? "PLAYOFFS" : "SEASON";
+          const mode =
+            saveNow.phase === "REGULAR_SEASON"
+              ? "MONTH"
+              : saveNow.phase === "PLAYOFFS"
+                ? "PLAYOFFS"
+                : saveNow.phase === "FREE_AGENCY" || saveNow.phase === "DRAFT"
+                  ? "WEEK" // 自由市场/选秀阶段按周推进：市场在 churn，拖太久好球员被签走
+                  : "SEASON";
           const r = advanceSim(evalRow.saveId, mode);
           const after = getSave(evalRow.saveId)!;
           const myRow = getDb().select().from(teamsT).where(eq(teamsT.id, evalRow.teamFullId)).get();
