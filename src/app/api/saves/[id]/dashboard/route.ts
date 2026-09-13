@@ -2,7 +2,7 @@ import { and, eq, or, asc } from "drizzle-orm";
 import { getDb } from "@/db";
 import { teams as teamsT, players as playersT, games as gamesT, saves as savesT } from "@/db/schema";
 import { getPhaseState, getChemistry, deadCapHit } from "@/server/engine";
-import { CBA, capSnapshot } from "@/domain/salary";
+import { capSnapshot, seasonMoney } from "@/domain/salary";
 import { assignStarters, placeIntoSlots } from "@/domain/positions";
 import { handleError, ok, fail } from "@/server/api-helpers";
 
@@ -166,7 +166,8 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
     };
 
     // ---- Cap / tax ----
-    const cap = capSnapshot(active, active.length, deadCapHit(id, teamShort));
+    const cap = capSnapshot(active, active.length, deadCapHit(id, teamShort), save.season);
+    const money = seasonMoney(save.season);
 
     // ---- Chemistry → basketball conclusions (3 weakest factors) ----
     const chem = getChemistry(id, teamShort);
@@ -197,8 +198,8 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
       advisors.push({
         id: "tax",
         severity: "HIGH",
-          title: `薪资 ${cap.totalSalary.toFixed(1)}M 已超税线（${CBA.luxuryTax}M）`,
-        detail: `按当前薪资预计需缴奢侈税 ${cap.taxBill.toFixed(1)}M（税线 ${CBA.luxuryTax}M）。送出到期合同或高薪低效球员可以止损。`,
+          title: `薪资 ${cap.totalSalary.toFixed(1)}M 已超税线（${money.luxuryTax}M）`,
+        detail: `按当前薪资预计需缴奢侈税 ${cap.taxBill.toFixed(1)}M（税线 ${money.luxuryTax}M）。送出到期合同或高薪低效球员可以止损。`,
         actionLabel: "处理交易",
         actionHref: "/trade",
       });
@@ -291,8 +292,8 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
         overCap: cap.overCap,
         overTax: cap.overTax,
         taxBill: cap.taxBill,
-        cap: CBA.salaryCap,
-        luxuryTax: CBA.luxuryTax,
+        cap: money.salaryCap,
+        luxuryTax: money.luxuryTax,
       },
       chemistry,
       advisors,

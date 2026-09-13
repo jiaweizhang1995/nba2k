@@ -1,7 +1,7 @@
 // Free agency: offer evaluation, AI competition, signing rules. Deterministic.
 
 import { rngFor } from "./rng";
-import { CBA, capSnapshot, round2, maxContractValue } from "./salary";
+import { CBA, capSnapshot, round2, maxContractValue, seasonMoney } from "./salary";
 import type { Contract } from "./types";
 import type { TradeTeam } from "./trade";
 
@@ -29,9 +29,9 @@ export interface OfferInput {
  * capped by the CBA max-contract tier for his years of service. Without the
  * cap, 10-year vets on 50M+ deals would ask above the legal max.
  */
-export function askingSalaryFor(contract: Contract, yearsPro: number, overall = 70, age = 27): number {
+export function askingSalaryFor(contract: Contract, yearsPro: number, overall = 70, age = 27, season?: number): number {
   const prev = contract.years[0]?.salary ?? 5;
-  const maxFirst = maxContractValue(yearsPro, 1).firstYear;
+  const maxFirst = maxContractValue(yearsPro, 1, season ?? contract.years[0]?.season ?? 2027).firstYear;
   // Market value is set by talent, not by what the last contract happened to
   // pay — an 85-overall player coming off a rookie deal does not ask 5.5M.
   const ratingPct = overall >= 90 ? 1 : overall >= 87 ? 0.85 : overall >= 84 ? 0.65 : overall >= 81 ? 0.45 : overall >= 78 ? 0.28 : overall >= 75 ? 0.16 : overall >= 72 ? 0.08 : 0;
@@ -39,7 +39,8 @@ export function askingSalaryFor(contract: Contract, yearsPro: number, overall = 
   // Prior salary anchors the ask, but the anchor weakens with age — a 34yo
   // ex-max player knows the market has corrected.
   const anchor = round2(prev * (age >= 33 ? 0.5 : age >= 30 ? 0.7 : 0.9));
-  return round2(Math.max(CBA.minimumSalary, Math.min(Math.max(ratingAsk, anchor), maxFirst)));
+  const floor = seasonMoney(season ?? contract.years[0]?.season ?? 2027).minimumSalary;
+  return round2(Math.max(floor, Math.min(Math.max(ratingAsk, anchor), maxFirst)));
 }
 
 export interface FaEvaluation {
@@ -50,21 +51,24 @@ export interface FaEvaluation {
 
 /** Does the team have room or an exception to pay this? `mleUsed` = the
  * team's one mid-level exception this offseason is already spent. */
-export function canAfford(team: TradeTeam, avgSalary: number, rosterAfter: number, deadMoney = 0, mleUsed = false): { ok: boolean; reason: string } {
-  const snap = capSnapshot(team.players.map((p) => ({ contract: p.contract })), rosterAfter, deadMoney);
-  if (rosterAfter > CBA.offseasonRosterMax) return { ok: false, reason: `签约后人数超过休赛期上限 ${CBA.offseasonRosterMax}` };
+export type SigningMechanism = "SPACE" | "MINIMUM" | "MLE" | "NONE";
+
+export function canAfford(team: TradeTeam, avgSalary: number, rosterAfter: number, deadMoney = 0, mleUsed = false, season: number = 2027): { ok: boolean; reason: string; mechanism: SigningMechanism } {
+  const m = seasonMoney(season);
+  const snap = capSnapshot(team.players.map((p) => ({ contract: p.contract })), rosterAfter, deadMoney, season);
+  if (rosterAfter > CBA.offseasonRosterMax) return { ok: false, reason: `签约后人数超过休赛期上限 ${CBA.offseasonRosterMax}`, mechanism: "NONE" };
   if (!snap.overCap) {
-    if (avgSalary <= snap.capSpace) return { ok: true, reason: "使用薪资空间" };
-    return { ok: false, reason: `薪资空间不足（剩余 ${snap.capSpace.toFixed(1)}M，报价 ${avgSalary.toFixed(1)}M）` };
+    if (avgSalary <= snap.capSpace) return { ok: true, reason: "使用薪资空间", mechanism: "SPACE" };
+    return { ok: false, reason: `薪资空间不足（剩余 ${snap.capSpace.toFixed(1)}M，报价 ${avgSalary.toFixed(1)}M）`, mechanism: "NONE" };
   }
   // 底薪特例先于土豪线拦截：二奢球队唯一能用的签约工具就是底薪，
   // 若先判 overSecondApron 连底薪都会被拒（与提示文案矛盾）。
-  if (avgSalary <= CBA.minimumSalary + 0.01) return { ok: true, reason: "使用底薪特例" };
-  if (snap.overSecondApron) return { ok: false, reason: "球队超过第二土豪线，只能签底薪" };
-  if (snap.overFirstApron) return { ok: false, reason: "球队超过第一土豪线，只能签底薪" };
-  if (mleUsed) return { ok: false, reason: "本赛季中产特例已使用，只剩底薪可用" };
-  if (avgSalary <= 12.8) return { ok: true, reason: "使用中产特例（上限 12.80M）" };
-  return { ok: false, reason: "球队在工资帽以上且特例不足以匹配报价" };
+  if (avgSalary <= m.minimumSalary + 0.01) return { ok: true, reason: "使用底薪特例", mechanism: "MINIMUM" };
+  if (snap.overSecondApron) return { ok: false, reason: "球队超过第二土豪线，只能签底薪", mechanism: "NONE" };
+  if (snap.overFirstApron) return { ok: false, reason: "球队超过第一土豪线，只能签底薪", mechanism: "NONE" };
+  if (mleUsed) return { ok: false, reason: "本赛季中产特例已使用，只剩底薪可用", mechanism: "NONE" };
+  if (avgSalary <= m.midLevelException) return { ok: true, reason: `使用中产特例（上限 ${m.midLevelException.toFixed(2)}M）`, mechanism: "MLE" };
+  return { ok: false, reason: "球队在工资帽以上且特例不足以匹配报价", mechanism: "NONE" };
 }
 
 /** Player's evaluation of an offer vs. asking price, role fit, and competition. */
@@ -75,10 +79,11 @@ export function evaluateOffer(
   seed: number,
   salt: string,
   competitorInterest: number = 0,
+  season: number = 2027,
 ): FaEvaluation {
   const rng = rngFor(seed, salt);
   const reasons: string[] = [];
-  const { firstYear } = maxContractValue(player.age < 25 ? 0 : player.age < 33 ? 8 : 17, 1);
+  const { firstYear } = maxContractValue(player.age < 25 ? 0 : player.age < 33 ? 8 : 17, 1, season);
   const moneyRatio = offer.avgSalary / Math.max(0.5, player.askingSalary);
 
   // 金钱是第一道门：市场定价不是装饰品。低于要价 ~12% 以上，球员几乎
@@ -127,11 +132,11 @@ export function aiCompetitionLevel(player: FaPlayer, seed: number, season: numbe
 }
 
 export function suggestedContract(player: FaPlayer, season: number): OfferInput {
+  const m = seasonMoney(season);
   const ageFactor = player.age <= 27 ? 1.1 : player.age <= 31 ? 1.0 : 0.75;
   const maxYears = Math.min(CBA.maxContractYears, player.age >= 32 ? 3 : 4);
-  void season;
   return {
     years: Math.max(1, Math.min(maxYears, player.askingYears)),
-    avgSalary: round2(Math.max(CBA.minimumSalary, Math.min(player.askingSalary * ageFactor, CBA.salaryCap * 0.35))),
+    avgSalary: round2(Math.max(m.minimumSalary, Math.min(player.askingSalary * ageFactor, m.salaryCap * 0.35))),
   };
 }

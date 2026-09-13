@@ -245,7 +245,7 @@ export function validateTrade(proposal: TradeProposal, teams: TradeTeam[], seaso
     // Salary matching
     const outgoing = givePlayers.reduce((a, p) => a + salaryForSeason(p.contract, 0), 0);
     const incoming = recvPlayers.reduce((a, p) => a + salaryForSeason(p.contract, 0), 0);
-    const snap = capSnapshot(team.players.map((p) => ({ contract: p.contract })), team.players.length, team.deadMoney ?? 0);
+    const snap = capSnapshot(team.players.map((p) => ({ contract: p.contract })), team.players.length, team.deadMoney ?? 0, season);
     const check = salaryMatching(outgoing, incoming, snap);
     salaryCheck.push({ partyTeamId: team.id, incoming: round2(incoming), outgoing: round2(outgoing), band: check.band, ok: check.ok });
     if (!check.ok) {
@@ -442,7 +442,7 @@ export function generateTradeOffers(
 ): GeneratedOffer[] {
   const userTeam = teams.find((t) => t.id === userTeamId);
   if (!userTeam) return [];
-  const userSnap = capSnapshot(userTeam.players.map((p) => ({ contract: p.contract })), userTeam.players.length, userTeam.deadMoney ?? 0);
+  const userSnap = capSnapshot(userTeam.players.map((p) => ({ contract: p.contract })), userTeam.players.length, userTeam.deadMoney ?? 0, season);
   const assetKey = [...userPackage.players, ...userPackage.picks].map((a) => a.id).sort().join("|");
   const userGives: OfferAssetRef[] = [
     ...userPackage.players.map((p) => ({ kind: "PLAYER" as const, id: p.id })),
@@ -465,7 +465,7 @@ export function generateTradeOffers(
 
   for (const team of teams) {
     if (team.id === userTeamId) continue;
-    const snap = capSnapshot(team.players.map((p) => ({ contract: p.contract })), team.players.length, team.deadMoney ?? 0);
+    const snap = capSnapshot(team.players.map((p) => ({ contract: p.contract })), team.players.length, team.deadMoney ?? 0, season);
     const minOut = minSalaryOut(salaryRecv, snap);
 
     const phaseTol = team.aiPhase === "CONTENDER" ? -1 : team.aiPhase === "PLAYOFF" ? 0 : team.aiPhase === "BUBBLE" ? 2 : 4;

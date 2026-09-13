@@ -21,7 +21,7 @@ import {
 } from "@/server/engine";
 import { generateDraftClass } from "@/domain/draft";
 import { askingSalaryFor, canAfford, evaluateOffer } from "@/domain/freeagency";
-import { CBA, maxContractValue, round2 } from "@/domain/salary";
+import { CBA, maxContractValue, round2, seasonMoney } from "@/domain/salary";
 
 let saveId: string;
 let userShort: string;
@@ -150,7 +150,8 @@ describe("bird rights + cut-down day + AI league dynamics", () => {
         .all().length;
       if (rosterCount > CBA.maxRosterSize) break;
       // Young FAs demand 4-year deals; the accept rule needs ≥60% of ask.
-      submitFaOffer(saveId, fa.id.split(":").slice(1).join(":"), 3, CBA.minimumSalary);
+      // League minimum scales with the cap — use the save's current season.
+      submitFaOffer(saveId, fa.id.split(":").slice(1).join(":"), 3, seasonMoney(getSave(saveId)!.season).minimumSalary);
     }
     const finalCount = db
       .select()

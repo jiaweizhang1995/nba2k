@@ -43,19 +43,21 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
     const roster = shortTeamId ? db.select().from(playersT).where(and(eq(playersT.saveId, id), eq(playersT.teamId, `${id}:${shortTeamId}`))).all() : [];
     const chemistry = shortTeamId ? getChemistry(id, shortTeamId) : null;
     const deadMoney = shortTeamId ? deadCapHit(id, shortTeamId) : 0;
+    const { CBA_VERSION, seasonMoney } = await import("@/domain/salary");
+    const money = seasonMoney(save.season);
     const cap = capSnapshot(
       roster,
       roster.filter((p) => p.status === "ACTIVE" || p.status === "INJURED").length,
       deadMoney,
+      save.season,
     );
-    const { CBA_VERSION, CBA } = await import("@/domain/salary");
     const ratingVersion = save.ratingVersion;
     return ok({
       save,
       userTeam,
       chemistry,
       ratingVersion,
-      cap: { ...cap, cbaVersion: CBA_VERSION, cap: CBA.salaryCap, tax: CBA.luxuryTax, firstApron: CBA.firstApron, secondApron: CBA.secondApron },
+      cap: { ...cap, cbaVersion: CBA_VERSION, cap: money.salaryCap, tax: money.luxuryTax, firstApron: money.firstApron, secondApron: money.secondApron },
       teamCount: teams.length,
     });
   } catch (e) {

@@ -27,7 +27,7 @@ import { loadRealPayload } from "@/data/real";
 import { importData } from "./import";
 import { RATING_VERSION } from "@/domain/ratings";
 import { createSchedule, advanceDay, applyDevelopment, seasonScore, type LeagueState, type LeaguePlayer, type LeagueTeam, type LeagueGame } from "@/domain/sim/season";
-import { CBA, CBA_VERSION, capSnapshot, round2, maxContractValue, contractEndSeason, salaryForSeason } from "@/domain/salary";
+import { CBA, CBA_VERSION, capSnapshot, round2, maxContractValue, contractEndSeason, salaryForSeason, seasonMoney } from "@/domain/salary";
 import { validateTrade, generateTradeOffers, TRADE_RULES_VERSION, aiEvaluateTrade, needPremium, playerValue, type TradeTeam, type TradePlayer, type TradePick } from "@/domain/trade";
 import { computeChemistry, CHEMISTRY_VERSION } from "@/domain/chemistry";
 import { runLottery, aiDraftPick, prospectRookieContract, generateScoutingReport, registerProspectRatings, generateDraftClass, type DraftProspect } from "@/domain/draft";
@@ -806,7 +806,7 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
       // asset stays one more year at the option salary (declining is just
       // waiving, which the agent can still do during FA).
       if (p.contract.option === "TO") {
-        const optSalary = p.contract.years[p.contract.years.length - 1]?.salary ?? CBA.minimumSalary;
+        const optSalary = p.contract.years[p.contract.years.length - 1]?.salary ?? seasonMoney(newSeason).minimumSalary;
         p.contract = { ...p.contract, years: [{ season: newSeason, salary: optSalary }], option: null };
         continue;
       }
@@ -822,7 +822,7 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
     // cheap controlled years are the whole point of rookie-scale deals.
     if (p.contract.option === "TO") {
       if (overall >= 66 || p.age <= 24) {
-        const optSalary = p.contract.years[p.contract.years.length - 1]?.salary ?? CBA.minimumSalary;
+        const optSalary = p.contract.years[p.contract.years.length - 1]?.salary ?? seasonMoney(newSeason).minimumSalary;
         p.contract = { ...p.contract, years: [{ season: newSeason, salary: optSalary }], option: null };
         resigned++;
         continue;
@@ -839,7 +839,7 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
       const newYears = rng.int(2, 4);
       // Re-sign at market value — a star leaving a rookie deal commands real
       // money, not last year's scale number plus a token raise.
-      const base = askingSalaryFor(p.contract, p.yearsPro, overall, p.age);
+      const base = askingSalaryFor(p.contract, p.yearsPro, overall, p.age, state.season);
       p.contract = {
         type: overall >= 86 ? "MAX" : "VETERAN",
         years: Array.from({ length: newYears }, (_, i) => ({ season: newSeason + i, salary: Math.round(base * (1 + i * 0.05) * 10) / 10 })),
@@ -1406,8 +1406,8 @@ export function startFreeAgency(saveId: string) {
             contract: {
               type: "MINIMUM",
               years: [
-                { season: save.season, salary: CBA.minimumSalary },
-                { season: save.season + 1, salary: CBA.minimumSalary },
+                { season: save.season, salary: seasonMoney(save.season).minimumSalary },
+                { season: save.season + 1, salary: seasonMoney(save.season + 1).minimumSalary },
               ],
               birdRights: false,
               noTrade: false,
@@ -1636,8 +1636,8 @@ export function runAiTradeMarket(saveId: string, diag?: Record<string, number>, 
           .filter((p) => !untouchable.has(p.id) && !p.contract.noTrade)
           // matching salary comes first — cheap-value pieces are $0 fillers
           .sort((a, b) => salaryForSeason(b.contract, 0) - salaryForSeason(a.contract, 0) || playerValue(a, season).value - playerValue(b, season).value);
-        const userSnap = capSnapshot(user.players.map((p) => ({ contract: p.contract })), user.players.length, user.deadMoney ?? 0);
-        const sellerSnap = capSnapshot(seller.players.map((p) => ({ contract: p.contract })), seller.players.length, seller.deadMoney ?? 0);
+        const userSnap = capSnapshot(user.players.map((p) => ({ contract: p.contract })), user.players.length, user.deadMoney ?? 0, season);
+        const sellerSnap = capSnapshot(seller.players.map((p) => ({ contract: p.contract })), seller.players.length, seller.deadMoney ?? 0, season);
         const sellerSlack = Math.max(0, CBA.maxRosterSize - seller.players.length + 1);
         const userSlack = Math.max(0, user.players.length - CBA.minRosterSize + 1);
         const askCap = Math.min(4, sellerSlack, userSlack);
@@ -1796,7 +1796,6 @@ export function respondInboundOffer(saveId: string, offerId: string, accept: boo
 // the player. Deterministic per (seed, season, date).
 // ---------------------------------------------------------------------------
 
-const AI_MLE = 12.8;
 const AI_ROSTER_TARGET = 15;
 const AI_APRON_FILLER_MAX = 74; // above the second apron only low-tier players take the minimum
 
@@ -1818,7 +1817,7 @@ function aiTrySignFreeAgent(
     .all()
     .filter((p) => p.status === "ACTIVE" || p.status === "INJURED");
   if (roster.length >= opts.targetRoster) return null;
-  const asking = askingSalaryFor(c.contract, c.yearsPro, c.ratings.overall, c.age);
+  const asking = askingSalaryFor(c.contract, c.yearsPro, c.ratings.overall, c.age, season);
   const offer = suggestedContract(
     {
       id: c.id,
@@ -1833,15 +1832,16 @@ function aiTrySignFreeAgent(
     },
     season,
   );
-  const snap = capSnapshot(roster, roster.length);
+  const money = seasonMoney(season);
+  const snap = capSnapshot(roster, roster.length, 0, season);
   let salary: number | null = null;
   if (!snap.overCap) salary = Math.min(offer.avgSalary, snap.capSpace);
-  else if (!snap.overSecondApron && !opts.mleUsed) salary = Math.min(offer.avgSalary, AI_MLE);
-  else if (c.ratings.overall < AI_APRON_FILLER_MAX) salary = CBA.minimumSalary;
-  if (salary == null || salary < CBA.minimumSalary) return null;
+  else if (!snap.overSecondApron && !opts.mleUsed) salary = Math.min(offer.avgSalary, money.midLevelException);
+  else if (c.ratings.overall < AI_APRON_FILLER_MAX) salary = money.minimumSalary;
+  if (salary == null || salary < money.minimumSalary) return null;
   // Money floor (same rule the user's offers face): a player with a market
   // doesn't take <88% of his ask because it's all the room a team has left.
-  if (salary < asking * 0.88 && salary > CBA.minimumSalary + 0.01) return null;
+  if (salary < asking * 0.88 && salary > money.minimumSalary + 0.01) return null;
   const years = Math.max(1, Math.min(CBA.maxContractYears, c.age >= 32 ? 2 : 3));
   q.update(playersT)
     .set({
@@ -1850,7 +1850,7 @@ function aiTrySignFreeAgent(
       status: "ACTIVE",
       role: "BENCH",
       contract: {
-        type: salary >= 30 ? "MAX" : salary <= CBA.minimumSalary + 0.01 ? "MINIMUM" : "VETERAN",
+        type: salary >= money.salaryCap * 0.28 ? "MAX" : salary <= money.minimumSalary + 0.01 ? "MINIMUM" : "VETERAN",
         years: Array.from({ length: years }, (_, i) => ({ season: season + i, salary: round2(salary) })),
         birdRights: false,
         noTrade: false,
@@ -1860,7 +1860,7 @@ function aiTrySignFreeAgent(
     })
     .where(eq(playersT.id, c.id))
     .run();
-  return { usedMle: snap.overCap && salary > CBA.minimumSalary + 0.01 };
+  return { usedMle: snap.overCap && salary > money.minimumSalary + 0.01 };
 }
 
 /** One day of AI free-agency signings while the user's window is open. */
@@ -1994,7 +1994,7 @@ export function startNewSeason(saveId: string) {
             role: "BENCH",
             contract: {
               type: "MINIMUM",
-              years: [{ season: save.season, salary: CBA.minimumSalary }],
+              years: [{ season: save.season, salary: seasonMoney(save.season).minimumSalary }],
               birdRights: false,
               noTrade: false,
               option: null,
@@ -2139,7 +2139,7 @@ export function submitFaOffer(saveId: string, playerId: string, years: number, a
     const teamQuality = team.players.reduce((a, p) => a + p.ratings.overall, 0) / Math.max(1, team.players.length);
     const rng = rngFor(save.seed, `fa-inseason:${save.season}:${playerId}`);
     const interest = Math.round(Math.max(0, Math.min(100, 52 + (teamQuality - 74) * 1.6 + rng.float(-10, 10))));
-    const avgSalary = CBA.minimumSalary;
+    const avgSalary = seasonMoney(save.season).minimumSalary;
     const years = 1;
     db.insert(faOffersT)
       .values({ id: uuid(), saveId, playerId: `${saveId}:${playerId}`, teamId: `${saveId}:${userShort}`, years, avgSalary, status: interest >= 45 ? "ACCEPTED" : "REJECTED", createdAt: now(), note: interest >= 45 ? "赛季中底薪签约" : "兴趣不足，拒绝底薪" })
@@ -2156,7 +2156,7 @@ export function submitFaOffer(saveId: string, playerId: string, years: number, a
         role: "BENCH",
         contract: {
           type: "MINIMUM",
-          years: [{ season: save.season, salary: CBA.minimumSalary }],
+          years: [{ season: save.season, salary: avgSalary }],
           birdRights: false,
           noTrade: false,
           option: null,
@@ -2170,19 +2170,31 @@ export function submitFaOffer(saveId: string, playerId: string, years: number, a
   }
 
   const rosterAfter = team.players.length + 1;
+
+  // CBA contract bounds: nothing below the league minimum, nothing above the
+  // player's service-tier max. Sub-minimum deals are free money; over-max is
+  // cap fraud.
+  const money = seasonMoney(save.season);
+  if (avgSalary < money.minimumSalary) {
+    return { accepted: false as const, reason: `报价低于联盟底薪 ${money.minimumSalary.toFixed(2)}M`, interest: 0 };
+  }
+  const playerMax = maxContractValue(player.yearsPro, 1, save.season).firstYear;
+  if (avgSalary > playerMax + 0.01) {
+    return { accepted: false as const, reason: `报价超过顶薪上限 ${playerMax.toFixed(2)}M/年`, interest: 0 };
+  }
   // Bird rights: re-signing a player who finished his contract with us is
   // allowed over the cap (and aprons), up to his max-contract tier. Roster
   // size limits still apply.
   const isBird = player.lastTeamId === `${saveId}:${userShort}`;
   const mleKey = `mleUsed:${save.season}`;
   const mleUsed = !!ps[mleKey];
-  const afford = isBird
+  const afford: { ok: boolean; reason: string; mechanism: "SPACE" | "MINIMUM" | "MLE" | "NONE" } = isBird
     ? rosterAfter > CBA.offseasonRosterMax
-      ? { ok: false, reason: `签约后人数超过休赛期上限 ${CBA.offseasonRosterMax}` }
-      : avgSalary <= maxContractValue(player.yearsPro, 1).firstYear
-        ? { ok: true, reason: "使用鸟权续约（超帽签下自家自由球员）" }
-        : { ok: false, reason: `鸟权续约上限为顶薪 ${maxContractValue(player.yearsPro, 1).firstYear.toFixed(1)}M/年` }
-    : canAfford(team, avgSalary, rosterAfter, team.deadMoney ?? 0, mleUsed);
+      ? { ok: false, reason: `签约后人数超过休赛期上限 ${CBA.offseasonRosterMax}`, mechanism: "NONE" }
+      : avgSalary <= maxContractValue(player.yearsPro, 1, save.season).firstYear
+        ? { ok: true, reason: "使用鸟权续约（超帽签下自家自由球员）", mechanism: "SPACE" }
+        : { ok: false, reason: `鸟权续约上限为顶薪 ${maxContractValue(player.yearsPro, 1, save.season).firstYear.toFixed(1)}M/年`, mechanism: "NONE" }
+    : canAfford(team, avgSalary, rosterAfter, team.deadMoney ?? 0, mleUsed, save.season);
 
   // AI competition
   const faPlayer = {
@@ -2192,13 +2204,13 @@ export function submitFaOffer(saveId: string, playerId: string, years: number, a
     age: player.age,
     ratings: { overall: player.ratings.overall, potential: player.ratings.potential },
     status: "FREE_AGENT" as const,
-    askingSalary: askingSalaryFor(player.contract, player.yearsPro, player.ratings.overall, player.age),
+    askingSalary: askingSalaryFor(player.contract, player.yearsPro, player.ratings.overall, player.age, save.season),
     askingYears: Math.max(1, Math.min(4, player.age >= 32 ? 2 : 4)),
     contract: player.contract,
   };
   const competition = aiCompetitionLevel(faPlayer, save.seed, save.season);
   // 盐值不含时间：同一存档+种子+同一报价必须得到同一结果（回放确定性）
-  const evalResult = evaluateOffer(faPlayer, { years, avgSalary }, team, save.seed, `fa:${save.season}:${playerId}`, competition);
+  const evalResult = evaluateOffer(faPlayer, { years, avgSalary }, team, save.seed, `fa:${save.season}:${playerId}`, competition, save.season);
 
   const recordOffer = (status: "ACCEPTED" | "REJECTED", note?: string) =>
     db
@@ -2225,7 +2237,7 @@ export function submitFaOffer(saveId: string, playerId: string, years: number, a
         status: "ACTIVE",
         role: "BENCH",
         contract: {
-          type: avgSalary >= 30 ? "MAX" : "VETERAN",
+          type: avgSalary >= money.salaryCap * 0.28 ? "MAX" : "VETERAN",
           years: Array.from({ length: years }, (_, i) => ({ season: save.season + i, salary: Math.round(avgSalary * 100) / 100 })),
           birdRights: false,
           noTrade: false,
@@ -2236,9 +2248,9 @@ export function submitFaOffer(saveId: string, playerId: string, years: number, a
       .where(eq(playersT.id, `${saveId}:${playerId}`))
       .run();
   });
-  // Consume the team's one mid-level exception when this signing used it:
-  // over-cap, above minimum, not Bird. Minimum/cap-space/Bird signings don't.
-  if (!isBird && afford.reason === "使用中产特例（上限 12.80M）") {
+  // Consume the team's one mid-level exception when this signing used it.
+  // Minimum/cap-space/Bird signings don't touch it.
+  if (!isBird && afford.mechanism === "MLE") {
     db.update(saves)
       .set({ phaseState: { ...getPhaseState(saveId), [mleKey]: true } as never, updatedAt: now() })
       .where(eq(saves.id, saveId))
@@ -2506,7 +2518,7 @@ export function getTeamAssets(saveId: string, teamId: string) {
   const db = getDb();
   const roster = db.select().from(playersT).where(and(eq(playersT.saveId, saveId), eq(playersT.teamId, `${saveId}:${teamId}`))).all();
   const picks = db.select().from(picksT).where(and(eq(picksT.saveId, saveId), eq(picksT.holderTeamId, `${saveId}:${teamId}`))).all();
-  const snap = capSnapshot(roster, roster.length, deadCapHit(saveId, teamId));
+  const snap = capSnapshot(roster, roster.length, deadCapHit(saveId, teamId), getSave(saveId)?.season);
   return {
     cap: snap,
     deadCap: deadCapEntries(saveId, teamId),

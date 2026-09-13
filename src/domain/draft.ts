@@ -1,7 +1,7 @@
 // Draft engine: scouting reports, lottery, draft flow. Deterministic.
 
 import { rngFor } from "./rng";
-import { rookieScaleSalary, CBA, round2 } from "./salary";
+import { rookieScaleSalary, CBA, round2, seasonMoney } from "./salary";
 import type { ScoutingReport } from "./types";
 
 export const DRAFT_RULES_VERSION = `${CBA.version} / DRAFT-RULES v1.0`;
@@ -150,8 +150,9 @@ export function aiDraftPick(
 }
 
 export function prospectRookieContract(pickNumber: number, round: number, season: number) {
-  const first = rookieScaleSalary(pickNumber, round);
-  const years = round === 1 ? [season, season + 1, season + 2, season + 3].map((s, i) => ({ season: s, salary: round2(first * (1 - i * 0.05)) })) : [season, season + 1].map((s) => ({ season: s, salary: CBA.rookieScale.round2Min }));
+  const first = rookieScaleSalary(pickNumber, round, season);
+  const r2 = round2(CBA.rookieScale.round2Min * (seasonMoney(season).salaryCap / CBA.salaryCap));
+  const years = round === 1 ? [season, season + 1, season + 2, season + 3].map((s, i) => ({ season: s, salary: round2(first * (1 - i * 0.05)) })) : [season, season + 1].map((s) => ({ season: s, salary: r2 }));
   const option = round === 1 ? ("TO" as const) : null;
   return { type: "ROOKIE" as const, years, birdRights: false, noTrade: false, option, signedSeason: season };
 }

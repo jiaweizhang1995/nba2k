@@ -17,7 +17,7 @@ import {
   waivePlayer,
 } from "@/server/engine";
 import { generateDraftClass } from "@/domain/draft";
-import { CBA, capSnapshot } from "@/domain/salary";
+import { CBA, capSnapshot, seasonMoney } from "@/domain/salary";
 
 let saveId: string;
 let userShort: string;
@@ -109,7 +109,8 @@ describe("free agency fairness + roster fill", () => {
       if (!fa) break;
       tried.add(fa.id);
       // Young FAs demand 4-year deals; the accept rule needs ≥60% of ask.
-      submitFaOffer(saveId, fa.id.split(":").slice(1).join(":"), 3, CBA.minimumSalary);
+      // League minimum grows with the cap — use the save's current season.
+      submitFaOffer(saveId, fa.id.split(":").slice(1).join(":"), 3, seasonMoney(getSave(saveId)!.season).minimumSalary);
     }
     const roster = db
       .select()

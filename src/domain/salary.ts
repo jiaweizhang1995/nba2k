@@ -53,6 +53,35 @@ export const CBA: CbaParams = {
   tradeDeadlineDay: 110,
 };
 
+/** Cap economics grow ~7%/yr like the real league — a 5-year max signed in
+ * 2027 should NOT still be a max-sized burden in 2031. All money lines scale
+ * together so relative distances (cap/tax/aprons) stay constant. */
+export const CBA_BASE_SEASON = 2027;
+export const CAP_GROWTH_PER_YEAR = 0.07;
+
+export interface SeasonMoney {
+  salaryCap: number;
+  luxuryTax: number;
+  firstApron: number;
+  secondApron: number;
+  minTeamSalary: number;
+  minimumSalary: number;
+  midLevelException: number;
+}
+
+export function seasonMoney(season: number = CBA_BASE_SEASON): SeasonMoney {
+  const g = Math.pow(1 + CAP_GROWTH_PER_YEAR, Math.max(0, season - CBA_BASE_SEASON));
+  return {
+    salaryCap: round2(CBA.salaryCap * g),
+    luxuryTax: round2(CBA.luxuryTax * g),
+    firstApron: round2(CBA.firstApron * g),
+    secondApron: round2(CBA.secondApron * g),
+    minTeamSalary: round2(CBA.minTeamSalary * g),
+    minimumSalary: round2(CBA.minimumSalary * g),
+    midLevelException: round2(12.8 * g),
+  };
+}
+
 export function teamSalary(players: Pick<PlayerRow, "contract">[]): number {
   return players.reduce((sum, p) => sum + salaryForSeason(p.contract, 0), 0);
 }
@@ -84,21 +113,22 @@ export interface CapSnapshot {
   rosterCount: number;
 }
 
-export function capSnapshot(teamPlayers: Pick<PlayerRow, "contract">[], rosterCount: number, deadMoney = 0): CapSnapshot {
+export function capSnapshot(teamPlayers: Pick<PlayerRow, "contract">[], rosterCount: number, deadMoney = 0, season: number = CBA_BASE_SEASON): CapSnapshot {
+  const m = seasonMoney(season);
   const totalSalary = round2(teamSalary(teamPlayers) + deadMoney);
-  const overCap = totalSalary > CBA.salaryCap;
-  const overTax = totalSalary > CBA.luxuryTax;
-  const overFirstApron = totalSalary > CBA.firstApron;
-  const overSecondApron = totalSalary > CBA.secondApron;
+  const overCap = totalSalary > m.salaryCap;
+  const overTax = totalSalary > m.luxuryTax;
+  const overFirstApron = totalSalary > m.firstApron;
+  const overSecondApron = totalSalary > m.secondApron;
   // Simplified marginal tax: $1.5 per $1 over tax line, $2.25 per $1 above first apron.
   let taxBill = 0;
   if (overTax) {
-    const above = totalSalary - CBA.luxuryTax;
-    taxBill = round2(Math.min(above, CBA.firstApron - CBA.luxuryTax) * 1.5 + Math.max(0, above - (CBA.firstApron - CBA.luxuryTax)) * 2.25);
+    const above = totalSalary - m.luxuryTax;
+    taxBill = round2(Math.min(above, m.firstApron - m.luxuryTax) * 1.5 + Math.max(0, above - (m.firstApron - m.luxuryTax)) * 2.25);
   }
   return {
     totalSalary,
-    capSpace: round2(CBA.salaryCap - totalSalary),
+    capSpace: round2(m.salaryCap - totalSalary),
     overCap,
     overTax,
     overFirstApron,
@@ -139,16 +169,17 @@ export function salaryMatching(outgoing: number, incoming: number, teamSnapshot:
   return { ok: inc <= limit, band: `OVER_CAP(大额): 接收薪资须 ≤ ${limit.toFixed(2)}M（125%+0.1M）` };
 }
 
-export function maxContractValue(yearsOfService: number, years: number): { total: number; firstYear: number } {
+export function maxContractValue(yearsOfService: number, years: number, season: number = CBA_BASE_SEASON): { total: number; firstYear: number } {
   const pct = yearsOfService < 9 ? CBA.maxSalaryPct.under9 : yearsOfService < 18 ? CBA.maxSalaryPct.nineTo18 : CBA.maxSalaryPct.over18;
-  const firstYear = round2(CBA.salaryCap * pct);
+  const firstYear = round2(seasonMoney(season).salaryCap * pct);
   return { firstYear, total: round2(firstYear * years) };
 }
 
-export function rookieScaleSalary(pickNumber: number, round: number): number {
+export function rookieScaleSalary(pickNumber: number, round: number, season: number = CBA_BASE_SEASON): number {
+  const g = seasonMoney(season).salaryCap / CBA.salaryCap;
   if (round === 1) {
     const t = Math.max(0, Math.min(29, pickNumber - 1)) / 29; // 0..1
-    return round2(CBA.rookieScale.pick1Round1 + (CBA.rookieScale.pick30Round1 - CBA.rookieScale.pick1Round1) * t);
+    return round2((CBA.rookieScale.pick1Round1 + (CBA.rookieScale.pick30Round1 - CBA.rookieScale.pick1Round1) * t) * g);
   }
-  return CBA.rookieScale.round2Min;
+  return round2(CBA.rookieScale.round2Min * g);
 }

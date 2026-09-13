@@ -246,7 +246,7 @@ function teamRoster(evalRow: { saveId: string; teamFullId: string; season?: numb
 function capSummaryOf(saveId: string, teamFullId: string) {
   const db = getDb();
   const roster = db.select().from(playersT).where(and(eq(playersT.saveId, saveId), eq(playersT.teamId, teamFullId))).all();
-  return capSnapshot(roster, roster.length, deadCapHit(saveId, shortId(teamFullId)));
+  return capSnapshot(roster, roster.length, deadCapHit(saveId, shortId(teamFullId)), getSave(saveId)?.season);
 }
 
 function toolGetRoster(evalRow: { saveId: string; teamFullId: string; seed: number }): ToolResult {
@@ -299,7 +299,7 @@ function toolGetMarket(evalRow: { saveId: string; teamFullId: string; seed: numb
       age: p.age,
       overall: p.ratings.overall,
       potential: p.ratings.potential,
-      asking: askingSalaryFor(p.contract, p.yearsPro, p.ratings.overall, p.age),
+      asking: askingSalaryFor(p.contract, p.yearsPro, p.ratings.overall, p.age, getSave(evalRow.saveId)?.season),
       askingYears: Math.max(1, Math.min(4, p.age >= 32 ? 2 : 4)),
       // Own expired player: we hold Bird rights and can re-sign over the cap.
       fromMyTeam: p.lastTeamId === evalRow.teamFullId,
@@ -608,7 +608,7 @@ const SYSTEM_PROMPT = `你是篮球经理模拟游戏《HARDWOOD GM》中的球�
 关键规则：
 - 自家合同到期的球员会进入自由市场（freeAgents[].fromMyTeam=true）。你持有鸟权：可超工资帽续约他们（上限为顶薪）；不续约则可能被其他球队签走。roster[].expiring 标记今夏到期者。
 - 休赛期阵容可到 20 人，但常规赛开打前必须裁到 18 人以内，否则 start_new_season 会被拒绝。
-- 工资帽规则：超帽只能用中产特例（≤12.8M/年，每个休赛期全队仅一次，cap.mleUsed 可查是否已用）或底薪（≤1.2M/年）；超第一土豪线失去中产，超第二土豪线只能底薪。
+- 工资帽规则：超帽只能用中产特例（每个休赛期全队仅一次，cap.mleUsed 可查是否已用）或底薪；超第一土豪线失去中产，超第二土豪线只能底薪。工资帽、税线、土豪线、中产与底薪额度每年随联盟收入上涨（观察中的 cap 字段返回当季数值，报价低于当季底薪会被直接拒绝）。
 - 自由市场是活的：每推进一天，AI 球队就会按市场价签人——好球员先被抢走，拖得越久池子越薄；报价远低于要价会被直接拒绝。
 - 裁员后剩余合同变为死钱仍占工资帽——裁大合同要三思。
 - roster[].morale 反映球员士气：输球文化和被埋没的天赋会让球星 UNHAPPY——不处理可能贬值甚至逼宫。
@@ -770,7 +770,7 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
       starterIds: healthyTop5,
       waiveCandidateId: myPlayers[0] ? shortId(myPlayers[0].id) : null,
       ownFaId: ownFa && ownFa.ratings.overall >= 70 ? shortId(ownFa.id) : null,
-      ownFaSalary: ownFa ? askingSalaryFor(ownFa.contract, ownFa.yearsPro, ownFa.ratings.overall, ownFa.age) : 0,
+      ownFaSalary: ownFa ? askingSalaryFor(ownFa.contract, ownFa.yearsPro, ownFa.ratings.overall, ownFa.age, getSave(evalRow.saveId)?.season) : 0,
       ownFaSigned,
       hasSignedThisStage: stage === "FREE_AGENCY" && db.select().from(faOffersT).where(and(eq(faOffersT.saveId, evalRow.saveId))).all().some((o) => o.teamId === evalRow.teamFullId),
       lastTurnWasSignAttempt:
