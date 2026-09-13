@@ -41,6 +41,7 @@ import {
   loadLeagueState,
   makeDraftPick,
   respondInboundOffer,
+  setRotation,
   startFreeAgency,
   startNewSeason,
   submitFaOffer,
@@ -251,9 +252,10 @@ function capSummaryOf(saveId: string, teamFullId: string) {
 function toolGetRoster(evalRow: { saveId: string; teamFullId: string; seed: number }): ToolResult {
   const chemistry = getChemistry(evalRow.saveId, shortId(evalRow.teamFullId));
   const cap = capSummaryOf(evalRow.saveId, evalRow.teamFullId);
+  const rotation = ((getPhaseState(evalRow.saveId).rotation as Record<string, { starters?: string[]; minutes?: Record<string, number> }> | undefined) ?? {})[shortId(evalRow.teamFullId)] ?? null;
   return {
     summary: `查看阵容：${teamRoster(evalRow).length} 人`,
-    data: { roster: teamRoster(evalRow), chemistry: chemistry.overall, chemistryFactors: chemistry.factors, cap },
+    data: { roster: teamRoster(evalRow), rotation, chemistry: chemistry.overall, chemistryFactors: chemistry.factors, cap },
     isAction: false,
   };
 }
@@ -589,7 +591,8 @@ const SYSTEM_PROMPT = `你是篮球经理模拟游戏《HARDWOOD GM》中的球�
 - get_roster / get_assets / get_market：查看信息（返回的对象都带 id 字段，动作参数必须使用这些 id，禁止猜测）
 - propose_trade：params = { partnerTeamId, givePlayerIds[], givePickIds[], receivePlayerIds[], receivePickIds[] }（partnerTeamId 用球队 teamId，其余用球员/选秀权的 id）
 - respond_trade：params = { offerId, accept }（回应 inboundOffers 里 AI 球队的主动报价；accept=true 接受，false 拒绝）
-- sign_free_agent：params = { playerId, years, avgSalary }（自由市场阶段；playerId 来自 freeAgents[].id）
+- set_rotation：params = { starters: [5 个球员 id], minutes?: {球员id: 分钟} }（设定首发与上场时间；伤停球员不能首发；轮换深度影响战绩与士气）
+- sign_free_agent：params = { playerId, years, avgSalary }（自由市场阶段按报价签约；常规赛期间只能签赛季剩余底薪合同，球员 id 来自 freeAgents[].id）
 - waive_player：params = { playerId }（裁掉我方球员；剩余合同变为死钱仍占工资帽）
 - draft_pick：params = { prospectId? }（选秀阶段；prospectId 来自 topProspects[].id，省略则选最优）
 - finish_draft：剩余选秀全部自动完成
@@ -748,9 +751,23 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
           .all()
           .some((t) => t.ok === true && (t.params as { playerId?: string } | null)?.playerId === shortId(ownFa.id))
       : false;
+    const rotationNow = ((getPhaseState(evalRow.saveId).rotation as Record<string, { starters?: string[] }> | undefined) ?? {})[shortId(evalRow.teamFullId)] ?? null;
+    const healthyTop5 = myPlayers
+      .filter((p) => !(p.status === "INJURED" || (p.injury && p.injury.weeksRemaining > 0)))
+      .sort((a, b) => b.ratings.overall - a.ratings.overall)
+      .slice(0, 5)
+      .map((p) => shortId(p.id));
+    const rosterShorts = new Set(myPlayers.map((p) => shortId(p.id)));
+    const needsRotation =
+      healthyTop5.length === 5 &&
+      (!rotationNow?.starters ||
+        rotationNow.starters.some((pid) => !rosterShorts.has(pid)) ||
+        rotationNow.starters.some((pid) => !healthyTop5.includes(pid)));
     const stubScene = {
       stage,
       rosterCount: myPlayers.length,
+      needsRotation,
+      starterIds: healthyTop5,
       waiveCandidateId: myPlayers[0] ? shortId(myPlayers[0].id) : null,
       ownFaId: ownFa && ownFa.ratings.overall >= 70 ? shortId(ownFa.id) : null,
       ownFaSalary: ownFa ? askingSalaryFor(ownFa.contract, ownFa.yearsPro, ownFa.ratings.overall, ownFa.age) : 0,
@@ -877,8 +894,15 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
           };
           break;
         }
+        case "set_rotation": {
+          const starters = (params.starters as string[] | undefined) ?? [];
+          const minutes = (params.minutes as Record<string, number> | undefined) ?? undefined;
+          const r = setRotation(evalRow.saveId, shortId(evalRow.teamFullId), starters, minutes);
+          toolResult = { summary: "轮换已更新", data: r as unknown as Record<string, unknown>, isAction: true, legal: true };
+          break;
+        }
         case "sign_free_agent":
-          if (stage !== "FREE_AGENCY") throw new EvalError("WRONG_STAGE", "签约仅在自由市场阶段");
+          if (stage !== "FREE_AGENCY" && stage !== "SEASON") throw new EvalError("WRONG_STAGE", "签约仅在自由市场或常规赛阶段");
           toolResult = toolSignFreeAgent({ ...evalCtx }, params);
           break;
         case "waive_player": {

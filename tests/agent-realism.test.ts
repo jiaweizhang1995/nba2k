@@ -14,6 +14,7 @@ import {
   listInboundOffers,
   makeDraftPick,
   respondInboundOffer,
+  setRotation,
   startNewSeason,
   submitFaOffer,
   waivePlayer,
@@ -322,6 +323,34 @@ describe("draft class floor", () => {
     // 20 seasons at ~18% → expect 2-8 generational classes, never zero.
     expect(genCount).toBeGreaterThanOrEqual(2);
     expect(genCount).toBeLessThanOrEqual(9);
+  });
+});
+
+describe("manager rotation", () => {
+  it("setRotation stores 5 owned healthy starters and rejects bad configs", async () => {
+    const s = await createSave({ name: "rotation", seed: 555020 });
+    const db = getDb();
+    const userFull = (getSave(s.saveId)!.phaseState as { userTeamId?: string }).userTeamId ?? `${s.saveId}:${s.teamId.split(":").pop()}`;
+    void userFull;
+    const short = s.teamId.split(":").pop()!;
+    const roster = db
+      .select()
+      .from(playersT)
+      .where(and(eq(playersT.saveId, s.saveId), eq(playersT.teamId, s.teamId)))
+      .all()
+      .sort((a, b) => b.ratings.overall - a.ratings.overall);
+    const five = roster.slice(0, 5).map((p) => p.id.split(":").pop()!);
+    const r = setRotation(s.saveId, short, five);
+    expect((r.rotation as { starters: string[] }).starters).toEqual(five);
+    // Duplicates and foreigners are rejected.
+    expect(() => setRotation(s.saveId, short, [five[0], five[0], five[1], five[2], five[3]])).toThrow();
+    const other = db
+      .select()
+      .from(playersT)
+      .where(and(eq(playersT.saveId, s.saveId)))
+      .all()
+      .find((p) => p.teamId !== s.teamId && p.teamId !== null)!;
+    expect(() => setRotation(s.saveId, short, [five[0], five[1], five[2], five[3], other.id.split(":").pop()!])).toThrow();
   });
 });
 

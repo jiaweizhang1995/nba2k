@@ -241,21 +241,17 @@ describe("AI tool permissions", () => {
       model: "rogue",
       apiKey: "sk-rogue",
     });
-    // 模拟恶意 Provider：在 SEASON 阶段返回签约动作（不属于该阶段）
+    // 模拟恶意 Provider：在 SEASON 阶段返回选秀动作（不属于该阶段）
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () =>
-      new Response(JSON.stringify({ choices: [{ message: { content: '{"action":"sign_free_agent","params":{"playerId":"p7","years":2,"avgSalary":10}}' } }] }), { status: 200 })) as unknown as typeof fetch;
+      new Response(JSON.stringify({ choices: [{ message: { content: '{"action":"draft_pick","params":{"prospectId":"p7"}}' } }] }), { status: 200 })) as unknown as typeof fetch;
     try {
       await stepEvaluation(id);
       const detail = getEvaluationDetail(id);
       const turn = detail.turns.at(-1)!;
-      expect(turn.action).toBe("sign_free_agent");
+      expect(turn.action).toBe("draft_pick");
       expect(turn.ok).toBe(false);
       expect(turn.resultSummary ?? "").toContain("不被允许");
-      // 阵容没有变化（签约未执行）
-      const db = getDb();
-      const roster = db.select().from(playersT).where(eq(playersT.saveId, `x`)).all();
-      void roster;
     } finally {
       globalThis.fetch = originalFetch;
     }

@@ -2110,7 +2110,10 @@ export function submitFaOffer(saveId: string, playerId: string, years: number, a
   const db = getDb();
   const save = getSave(saveId);
   if (!save) throw new EngineError("NO_SAVE", "存档不存在");
-  if (save.phase !== "FREE_AGENCY") throw new EngineError("WRONG_PHASE", "当前不在自由市场阶段");
+  if (save.phase !== "FREE_AGENCY" && save.phase !== "REGULAR_SEASON") {
+    throw new EngineError("WRONG_PHASE", "只能在自由市场或常规赛期间签约");
+  }
+  const inSeason = save.phase === "REGULAR_SEASON";
   const player = db.select().from(playersT).where(eq(playersT.id, `${saveId}:${playerId}`)).get();
   if (!player || player.status !== "FREE_AGENT") throw new EngineError("NOT_FA", "该球员不是自由球员");
 
@@ -2121,6 +2124,51 @@ export function submitFaOffer(saveId: string, playerId: string, years: number, a
   const userShort = userTeamId.includes(":") ? userTeamId.split(":").pop()! : userTeamId;
 
   const team = toTradeTeam(saveId, userShort);
+
+  // In-season signings are rest-of-season minimum deals — that's all the CBA
+  // allows anyone to offer mid-year. The agent still picks WHO; the money
+  // question disappears (every suitor offers the same 1.2M).
+  if (inSeason) {
+    const rosterAfterInSeason = team.players.length + 1;
+    if (rosterAfterInSeason > CBA.maxRosterSize) {
+      return { accepted: false as const, reason: `签约后人数超过常规赛上限 ${CBA.maxRosterSize}`, interest: 0 };
+    }
+    // Unsigned-by-December players have no leverage — they take the minimum.
+    // Interest still varies: ring-chasers prefer contenders, warm bodies sign
+    // with anyone offering a roster spot.
+    const teamQuality = team.players.reduce((a, p) => a + p.ratings.overall, 0) / Math.max(1, team.players.length);
+    const rng = rngFor(save.seed, `fa-inseason:${save.season}:${playerId}`);
+    const interest = Math.round(Math.max(0, Math.min(100, 52 + (teamQuality - 74) * 1.6 + rng.float(-10, 10))));
+    const avgSalary = CBA.minimumSalary;
+    const years = 1;
+    db.insert(faOffersT)
+      .values({ id: uuid(), saveId, playerId: `${saveId}:${playerId}`, teamId: `${saveId}:${userShort}`, years, avgSalary, status: interest >= 45 ? "ACCEPTED" : "REJECTED", createdAt: now(), note: interest >= 45 ? "赛季中底薪签约" : "兴趣不足，拒绝底薪" })
+      .run();
+    if (interest < 45) {
+      logEvent(saveId, "FA", `底薪报价被拒：${player.name}（兴趣度 ${interest}/100）`, { playerId });
+      return { accepted: false as const, reason: `球员兴趣不足（${interest}/100），不愿底薪加盟`, interest };
+    }
+    db.update(playersT)
+      .set({
+        teamId: `${saveId}:${userShort}`,
+        lastTeamId: `${saveId}:${userShort}`,
+        status: "ACTIVE",
+        role: "BENCH",
+        contract: {
+          type: "MINIMUM",
+          years: [{ season: save.season, salary: CBA.minimumSalary }],
+          birdRights: false,
+          noTrade: false,
+          option: null,
+          signedSeason: save.season,
+        },
+      })
+      .where(eq(playersT.id, `${saveId}:${playerId}`))
+      .run();
+    logEvent(saveId, "FA", `赛季中底薪签约：${player.name} 加盟 ${userShort}`, { playerId, teamId: userShort });
+    return { accepted: true as const, interest, reasons: ["赛季中底薪签约（剩余赛季）"] };
+  }
+
   const rosterAfter = team.players.length + 1;
   // Bird rights: re-signing a player who finished his contract with us is
   // allowed over the cap (and aprons), up to his max-contract tier. Roster
@@ -2265,6 +2313,39 @@ export function waivePlayer(saveId: string, playerId: string) {
   });
   logEvent(saveId, "ROSTER", `裁掉 ${player.name}：剩余 ${deadEntries.length} 年合同共 ${total.toFixed(1)}M 计入死钱`, { playerId, deadEntries, total });
   return { waived: player.name, deadMoney: deadEntries, total };
+}
+
+/**
+ * Manager-set rotation: 5 starters + optional per-player minute targets,
+ * stored in phaseState.rotation[teamShort]. Same validation the API route
+ * enforces — starters must be owned, distinct, and available.
+ */
+export function setRotation(saveId: string, teamShortId: string, starters: string[], minutes?: Record<string, number>) {
+  const db = getDb();
+  const save = getSave(saveId);
+  if (!save) throw new EngineError("NO_SAVE", "存档不存在");
+  const teamShort = teamShortId.includes(":") ? teamShortId.split(":").pop()! : teamShortId;
+  const roster = db
+    .select()
+    .from(playersT)
+    .where(and(eq(playersT.saveId, saveId), eq(playersT.teamId, `${saveId}:${teamShort}`)))
+    .all();
+  if (new Set(starters).size !== 5) throw new EngineError("DUP_STARTERS", "首发必须是 5 名不同球员");
+  const byShort = new Map(roster.map((p) => [p.id.split(":").slice(1).join(":"), p]));
+  for (const pid of starters) {
+    const p = byShort.get(pid);
+    if (!p) throw new EngineError("NOT_OWNED", `球员 ${pid} 不在该队阵容中`);
+    if (p.status === "INJURED" || (p.injury && p.injury.weeksRemaining > 0)) {
+      throw new EngineError("STARTER_UNAVAILABLE", `${p.name} 伤停中，不能首发`);
+    }
+  }
+  const ps = getPhaseState(saveId);
+  const rotation = { ...((ps.rotation as Record<string, unknown>) ?? {}) };
+  rotation[teamShort] = { starters, minutes: minutes ?? {} };
+  db.update(saves).set({ phaseState: { ...ps, rotation } as never, updatedAt: now() }).where(eq(saves.id, saveId)).run();
+  const nameOf = (pid: string) => byShort.get(pid)?.name ?? pid;
+  logEvent(saveId, "SYSTEM", `更新轮换：${teamShort} 首发 ${starters.map(nameOf).join("、")}`, { teamId: teamShort });
+  return { rotation: rotation[teamShort] };
 }
 
 // ---------------------------------------------------------------------------

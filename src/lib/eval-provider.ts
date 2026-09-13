@@ -21,6 +21,7 @@ export const GM_ACTIONS = [
   "get_market",
   "propose_trade",
   "respond_trade",
+  "set_rotation",
   "sign_free_agent",
   "waive_player",
   "draft_pick",
@@ -35,10 +36,10 @@ export type GmAction = (typeof GM_ACTIONS)[number];
 
 /** 各阶段允许的动作（权限白名单 —— 权限测试的依据）。 */
 export const STAGE_ALLOWED_ACTIONS: Record<string, GmAction[]> = {
-  SEASON: ["get_roster", "get_assets", "get_market", "propose_trade", "respond_trade", "waive_player", "set_strategy", "advance_season", "do_nothing"],
+  SEASON: ["get_roster", "get_assets", "get_market", "propose_trade", "respond_trade", "set_rotation", "sign_free_agent", "waive_player", "set_strategy", "advance_season", "do_nothing"],
   // Draft-night trades and roster trims are real NBA — both allowed here.
-  DRAFT: ["get_roster", "get_assets", "get_market", "propose_trade", "waive_player", "draft_pick", "finish_draft", "do_nothing"],
-  FREE_AGENCY: ["get_roster", "get_assets", "get_market", "propose_trade", "sign_free_agent", "waive_player", "start_new_season", "do_nothing"],
+  DRAFT: ["get_roster", "get_assets", "get_market", "propose_trade", "set_rotation", "waive_player", "draft_pick", "finish_draft", "do_nothing"],
+  FREE_AGENCY: ["get_roster", "get_assets", "get_market", "propose_trade", "set_rotation", "sign_free_agent", "waive_player", "start_new_season", "do_nothing"],
   DONE: [],
 };
 
@@ -206,6 +207,8 @@ interface StubScene {
   years: number;
   rosterCount?: number;
   waiveCandidateId?: string | null;
+  needsRotation?: boolean;
+  starterIds?: string[];
   inboundOfferId?: string | null;
   inboundGood?: boolean;
   ownFaId?: string | null;
@@ -246,6 +249,9 @@ export function stubAction(scene: StubScene): GmActionPayload {
     }
     if (!scene.strategySet) {
       return base("记录球队策略", { action: "set_strategy", params: { text: "Stub 策略：保持薪资灵活，逐年补强轮换深度。" } });
+    }
+    if (scene.needsRotation && scene.starterIds?.length === 5) {
+      return base("按战力排定首发五虎", { action: "set_rotation", params: { starters: scene.starterIds } });
     }
     return base("推进约一个月赛程", { action: "advance_season" });
   }
