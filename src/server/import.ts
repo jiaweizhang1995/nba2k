@@ -219,7 +219,12 @@ export async function importData(saveId: string, payload: ImportPayload): Promis
           seasonStats: [statLine],
           careerStats: [statLine],
           contract: p.contract && (p.contract.years?.[0]?.salary ?? 0) > 0
-            ? p.contract
+            ? {
+                ...p.contract,
+                // Payload contracts are already in force — a signedSeason of
+                // the current season would wrongly trip the Dec-15 trade lock.
+                signedSeason: Math.min(p.contract.signedSeason ?? season - 1, season - 1),
+              }
             : {
                 // No reliable source contract → market-value placeholder:
                 // nobody in the NBA actually plays for $0, and a zero-salary
@@ -229,7 +234,10 @@ export async function importData(saveId: string, payload: ImportPayload): Promis
                 birdRights: false,
                 noTrade: false,
                 option: null,
-                signedSeason: season,
+                // Imported players are mid-deal or signed before this window —
+                // season-1 keeps them tradeable (Dec-15 rule only bites
+                // contracts signed DURING the save).
+                signedSeason: season - 1,
               },
           status: "ACTIVE",
           role: "ROTATION",
@@ -451,7 +459,9 @@ export function mergeContracts(saveId: string, rows: ContractCsvRow[], meta: { p
             birdRights: years >= 2,
             noTrade: false,
             option: null,
-            signedSeason: save.season,
+            // Contract backfill: player already exists — treat the deal as
+            // signed before this window so the Dec-15 lock doesn't apply.
+            signedSeason: save.season - 1,
           },
         })
         .where(eq(playersT.id, player.id))

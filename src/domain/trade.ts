@@ -143,9 +143,11 @@ export function pickValue(pick: TradePick, season: number): Valuation {
 /**
  * Validate a trade against league rules. Supports 2-3 team trades.
  * Rules: roster size 13-15, salary matching bands, no-trade clauses,
- * Stepien rule (own future 1sts in consecutive years), single-appearance.
+ * Stepien rule (own future 1sts in consecutive years), single-appearance,
+ * recently-signed restriction (Dec-15 rule: a player signed this season
+ * can't be traded until Dec 15).
  */
-export function validateTrade(proposal: TradeProposal, teams: TradeTeam[], season: number): TradeValidation {
+export function validateTrade(proposal: TradeProposal, teams: TradeTeam[], season: number, now?: { phase?: string; date?: string }): TradeValidation {
   const issues: TradeRuleIssue[] = [];
   const salaryCheck: TradeValidation["salaryCheck"] = [];
 
@@ -218,6 +220,19 @@ export function validateTrade(proposal: TradeProposal, teams: TradeTeam[], seaso
       }
     }
 
+    // Dec-15 rule: a player signed this season is trade-locked until
+    // Dec 15 — sign-and-flip is not a real arbitrage.
+    for (const p of givePlayers) {
+      if (p && p.contract.signedSeason === season) {
+        const locked =
+          now?.phase === "FREE_AGENCY" || now?.phase === "DRAFT" ||
+          (now?.phase === "REGULAR_SEASON" && (now.date ?? "") < `${season}-12-15`);
+        if (locked) {
+          issues.push({ code: "RECENTLY_SIGNED", severity: "BLOCKER", message: `${p.name} 本赛季刚签约，12 月 15 日前不可被交易` });
+        }
+      }
+    }
+
     // Roster size after trade
     const afterSize = team.players.length - givePlayers.length + recvPlayers.length;
     if (afterSize > CBA.maxRosterSize) {
@@ -268,7 +283,14 @@ export function validateTrade(proposal: TradeProposal, teams: TradeTeam[], seaso
     // Picks given away must remain count >= 0; nothing else.
   }
 
-  // Trade window: deadline during regular season (simplified).
+  // Trade window: closed during playoffs and after the Feb-6 in-season
+  // deadline. Kept inside the domain validator so every caller (execute,
+  // offer generation, inbound offers) sees the same WINDOW blocker.
+  if (now?.phase === "PLAYOFFS") {
+    issues.push({ code: "WINDOW", severity: "BLOCKER", message: "季后赛期间交易窗口关闭" });
+  } else if (now?.phase === "REGULAR_SEASON" && (now.date ?? "") > `${season}-02-06`) {
+    issues.push({ code: "WINDOW", severity: "BLOCKER", message: "交易截止日已过（2 月 6 日），本赛季交易窗口关闭" });
+  }
   return { legal: issues.every((i) => i.severity !== "BLOCKER"), issues, salaryCheck };
 }
 
@@ -416,6 +438,7 @@ export function generateTradeOffers(
   season: number,
   seed: number,
   maxOffers = 6,
+  now?: { phase?: string; date?: string },
 ): GeneratedOffer[] {
   const userTeam = teams.find((t) => t.id === userTeamId);
   if (!userTeam) return [];
@@ -575,7 +598,7 @@ export function generateTradeOffers(
         { teamId: userTeamId, gives: userGives, receives: gives },
         { teamId: team.id, gives, receives: userGives },
       ];
-      const validation = validateTrade({ saveId: "offers", parties }, teams, season);
+      const validation = validateTrade({ saveId: "offers", parties }, teams, season, now);
       if (!validation.legal) continue;
       const verdict = aiEvaluateTrade(parties[1], { saveId: "offers", parties }, teams, season);
       if (!verdict.accept) continue;

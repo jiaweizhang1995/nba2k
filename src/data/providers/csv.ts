@@ -73,7 +73,9 @@ export function parsePlayersCsv(text: string, meta: ProvenanceMeta): ImportedPla
               birdRights: false,
               noTrade: false,
               option: null,
-              signedSeason: meta.season ?? 0,
+              // Imported vets are mid-deal — a year-0 signedSeason would
+              // trip the Dec-15 trade lock on day one of a new save.
+              signedSeason: (meta.season ?? 1) - 1,
             }
           : null,
       statLine: {

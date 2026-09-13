@@ -1031,6 +1031,15 @@ export function finishEvaluation(id: string): StepOutcome {
   const errorRate = evalRow.callCount > 0 ? evalRow.errorCount / evalRow.callCount : 0;
   const chemistry = getChemistry(evalRow.saveId, shortId(evalRow.teamFullId)).overall;
   const tradeEvents = db.select().from(eventsT).where(and(eq(eventsT.saveId, evalRow.saveId), eq(eventsT.category, "TRADE"))).all();
+  // Split league noise from GM activity: executed trades carry `parties` in
+  // the payload; market summaries and inbound offers don't. "User" trades are
+  // executed trades where the evaluated team is a party.
+  const userShort = shortId(evalRow.teamFullId);
+  const executedTrades = tradeEvents.filter((e) => Array.isArray((e.payload as { parties?: { teamId: string }[] } | null)?.parties));
+  const userTrades = executedTrades.filter((e) =>
+    ((e.payload as { parties: { teamId: string }[] }).parties ?? []).some((p) => p.teamId === userShort),
+  );
+  const leagueTrades = executedTrades.length - userTrades.length;
   const seasonsRecorded = Math.max(1, seasons.length);
   const winsPerSeason = totalWins / seasonsRecorded;
 
@@ -1085,8 +1094,10 @@ export function finishEvaluation(id: string): StepOutcome {
     tokensOut: evalRow.tokensOut,
     costCents: evalRow.costCents,
     finalChemistry: chemistry,
-    tradeCount: tradeEvents.length,
-    trades: tradeEvents.map((t) => t.message).slice(0, 30),
+    tradeCount: userTrades.length,
+    leagueTradeCount: leagueTrades,
+    tradeEventCount: tradeEvents.length,
+    trades: userTrades.map((t) => t.message).slice(0, 30),
     rosterValueStart,
     rosterValueEnd,
     rosterValueDelta,

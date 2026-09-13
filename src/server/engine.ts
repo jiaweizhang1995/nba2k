@@ -1045,7 +1045,7 @@ export function validateTradeOnServer(saveId: string, parties: TradeParty[]) {
   const save = getSave(saveId);
   if (!save) throw new EngineError("NO_SAVE", "存档不存在");
   const teams = parties.map((p) => toTradeTeam(saveId, p.teamId));
-  return validateTrade({ saveId, parties }, teams, save.season);
+  return validateTrade({ saveId, parties }, teams, save.season, { phase: save.phase, date: save.currentDate });
 }
 
 export function getAiTradeFeedback(saveId: string, parties: TradeParty[]) {
@@ -1100,7 +1100,7 @@ export function requestTradeOffers(saveId: string, gives: { kind: "PLAYER" | "PI
     throw new EngineError("EMPTY_OFFER", "请先选择要送出的球员或选秀权");
   }
 
-  const offers = generateTradeOffers(userShort, { players, picks }, teams, save.season, save.seed);
+  const offers = generateTradeOffers(userShort, { players, picks }, teams, save.season, save.seed, 6, { phase: save.phase, date: save.currentDate });
 
   const labelFor = (teamShortId: string, a: { kind: "PLAYER" | "PICK"; id: string }) => {
     const t = teams.find((x) => x.id === teamShortId);
@@ -1148,7 +1148,13 @@ export function executeTrade(saveId: string, parties: TradeParty[], opts: { godM
     }
   }
   const teams = parties.map((p) => toTradeTeam(saveId, p.teamId));
-  const validation = validateTrade({ saveId, parties }, teams, save.season);
+  // The deadline market fires on the first sim day on/after Feb 6 — validate
+  // it as-of the deadline so the WINDOW rule doesn't kill legitimate market
+  // trades (they already ran inside the real window).
+  const validationNow = isAiMarket || opts.allowPostDeadline
+    ? { phase: save.phase, date: `${save.season}-02-06` }
+    : { phase: save.phase, date: save.currentDate };
+  const validation = validateTrade({ saveId, parties }, teams, save.season, validationNow);
   if (!validation.legal && !(opts.godMode && opts.force)) {
     return { executed: false as const, validation };
   }
@@ -1753,7 +1759,10 @@ export function respondInboundOffer(saveId: string, offerId: string, accept: boo
     { teamId: seller.id, gives: [{ kind: "PLAYER", id: offer.playerId }], receives: offer.asks },
     { teamId: user.id, gives: offer.asks, receives: [{ kind: "PLAYER", id: offer.playerId }] },
   ];
-  const validation = validateTrade({ saveId, parties }, [seller, user], season);
+  const saveNow = getSave(saveId)!;
+  // The offer was struck at the deadline — validate it as-of that date so the
+  // WINDOW rule doesn't retroactively kill a live offer the GM is answering.
+  const validation = validateTrade({ saveId, parties }, [seller, user], season, { phase: saveNow.phase, date: `${season}-02-06` });
   if (!validation.legal) {
     clear();
     const msg = validation.issues.find((i) => i.severity === "BLOCKER")?.message ?? "交易不再合法";
