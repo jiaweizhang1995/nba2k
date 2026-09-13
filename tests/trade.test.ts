@@ -273,6 +273,45 @@ describe("Trade offer collection (征集报价)", () => {
   });
 });
 
+describe("second-apron aggregation ban", () => {
+  it("a team over the second apron cannot send out multiple players", async () => {
+    const { validateTrade } = await import("@/domain/trade");
+    const { seasonMoney } = await import("@/domain/salary");
+    const state = loadLeagueState(saveId);
+    const season = state.season;
+    const secondApron = seasonMoney(season).secondApron;
+    // Build a second-apron team: 15 players at 20M each = 300M > apron.
+    const roster = state.players.filter((p) => p.teamId).slice(0, 15);
+    const mkTeam = (id: string, pids: string[], salary: number) => ({
+      id, abbr: id,
+      players: pids.map((pid) => {
+        const p = state.players.find((x) => x.id === pid)!;
+        return { id: p.id, name: p.name, teamId: id, position: p.position, age: p.age, yearsPro: p.yearsPro, ratings: p.ratings as never, contract: { ...p.contract, signedSeason: 2020, years: [{ season, salary }] }, status: p.status, role: p.role, satisfaction: p.satisfaction };
+      }),
+      picks: [], aiPhase: "PLAYOFF" as const, aiRisk: 0.5, deadMoney: 0,
+    });
+    const apronIds = roster.map((p) => p.id);
+    const partnerRoster = state.players.filter((p) => p.teamId && !apronIds.includes(p.id)).slice(0, 15);
+    const teams = [mkTeam(userTeam, apronIds, Math.ceil(secondApron / 15) + 5), mkTeam(partnerTeam, partnerRoster.map((p) => p.id), 12)];
+    // Two out, one in at matching total → aggregation banned over apron.
+    const two = apronIds.slice(0, 2);
+    const one = partnerRoster[0].id;
+    const parties = [
+      { teamId: userTeam, gives: two.map((id) => ({ kind: "PLAYER" as const, id })), receives: [{ kind: "PLAYER" as const, id: one }] },
+      { teamId: partnerTeam, gives: [{ kind: "PLAYER" as const, id: one }], receives: two.map((id) => ({ kind: "PLAYER" as const, id })) },
+    ];
+    const v = validateTrade({ saveId, parties }, teams, season, { phase: "REGULAR_SEASON", date: `${season - 1}-12-20` });
+    expect(v.issues.some((i) => i.code === "APRON_AGGREGATION")).toBe(true);
+    // Same team, 1-for-1 → no aggregation issue.
+    const parties11 = [
+      { teamId: userTeam, gives: [{ kind: "PLAYER" as const, id: apronIds[0] }], receives: [{ kind: "PLAYER" as const, id: one }] },
+      { teamId: partnerTeam, gives: [{ kind: "PLAYER" as const, id: one }], receives: [{ kind: "PLAYER" as const, id: apronIds[0] }] },
+    ];
+    const v2 = validateTrade({ saveId, parties: parties11 }, teams, season, { phase: "REGULAR_SEASON", date: `${season - 1}-12-20` });
+    expect(v2.issues.some((i) => i.code === "APRON_AGGREGATION")).toBe(false);
+  });
+});
+
 describe("Dec-15 recently-signed lock", () => {
   it("releases on Dec 15 of the SIGNING calendar year, not a year late", async () => {
     const { validateTrade } = await import("@/domain/trade");

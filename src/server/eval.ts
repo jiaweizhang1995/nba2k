@@ -302,9 +302,28 @@ function toolGetAssets(evalRow: { saveId: string; teamFullId: string; seed: numb
   };
 }
 
-function toolGetMarket(evalRow: { saveId: string; teamFullId: string; seed: number; season: number }): ToolResult {
+function toolGetMarket(evalRow: { saveId: string; teamFullId: string; seed: number; season: number }, params?: Record<string, unknown>): ToolResult {
   const db = getDb();
   const sheetPlayerIds = new Set(listOfferSheets(evalRow.saveId).map((s) => s.playerId));
+  // Scouting view: a specific team's full roster + contract books.
+  if (params?.teamId) {
+    const fullId = `${evalRow.saveId}:${String(params.teamId)}`;
+    const team = db.select().from(teamsT).where(eq(teamsT.id, fullId)).get();
+    if (!team) return { summary: "球队不存在", isAction: false };
+    const roster = db.select().from(playersT).where(and(eq(playersT.saveId, evalRow.saveId), eq(playersT.teamId, fullId))).all()
+      .sort((a, b) => b.ratings.overall - a.ratings.overall)
+      .map((p) => ({
+        id: shortId(p.id), name: p.name, pos: p.position, age: p.age, ovr: p.ratings.overall, pot: p.ratings.potential,
+        salary: p.contract.years[0]?.salary ?? 0, endSeason: p.contract.years[p.contract.years.length - 1]?.season ?? null,
+        option: p.contract.option, noTrade: p.contract.noTrade, morale: p.satisfaction <= 40 ? "UNHAPPY" : p.satisfaction <= 58 ? "UNEASY" : "CONTENT",
+        injured: !!(p.injury && p.injury.weeksRemaining > 0),
+      }));
+    const cap = capSummaryOf(evalRow.saveId, fullId);
+    const picks = db.select().from(picksT).where(and(eq(picksT.saveId, evalRow.saveId), eq(picksT.holderTeamId, fullId))).all()
+      .filter((k) => k.status === "OWNED")
+      .map((k) => ({ id: shortId(k.id), year: k.year, round: k.round, protection: k.protection?.type ?? "NONE" }));
+    return { summary: `侦察 ${team.abbr}：${roster.length} 人，帽空间 ${cap.capSpace}M`, data: { team: { id: shortId(team.id), abbr: team.abbr, phase: team.aiPhase, record: `${team.wins}-${team.losses}` }, roster, cap: { total: cap.totalSalary, space: cap.capSpace, overTax: cap.overTax, overSecondApron: cap.overSecondApron }, picks }, isAction: false };
+  }
   const fas = db
     .select()
     .from(playersT)
@@ -603,7 +622,7 @@ function buildObservation(evalRow: { saveId: string; teamFullId: string; teamSho
     // Players whose contract ends this offseason — they enter the market and
     // we hold Bird rights (re-signable over the cap). Plan before FA opens.
     expiringThisOffseason: fullRoster.filter((p) => p.expiring).map((p) => ({ id: p.id, name: p.name, overall: p.overall, salary: p.salary })),
-    inboundOffers: listInboundOffers(evalRow.saveId).map((o) => ({ offerId: o.id, fromTeam: o.fromTeam, theyGive: o.playerName, theyWant: o.askNames })),
+    inboundOffers: listInboundOffers(evalRow.saveId).map((o) => ({ offerId: o.id, fromTeam: o.fromTeam, theyGive: o.playerName, theyWant: o.askNames, expiresOn: o.expiresOn })),
     // Offer sheets on YOUR restricted free agents — match (respond_offer_sheet)
     // or lose him when the sheet expires.
     offerSheets: listOfferSheets(evalRow.saveId).map((s) => ({ sheetId: s.id, playerId: shortId(s.playerId), fromTeam: shortId(s.fromTeamId), salary: s.salary, years: s.years, expiresOn: s.expiresOn })),
@@ -635,9 +654,9 @@ function standingsRank(state: ReturnType<typeof loadLeagueState>, teamShortId: s
 
 const SYSTEM_PROMPT = `你是篮球经理模拟游戏《HARDWOOD GM》中的球队总经理 AI。你通过返回严格 JSON 动作来运营球队。
 可用动作（必须逐字使用 action 字段；观察里的 allowedActions 列出当前阶段合法动作）：
-- get_roster / get_assets / get_market：查看信息（返回的对象都带 id 字段，动作参数必须使用这些 id，禁止猜测）
+- get_roster / get_assets / get_market：查看信息（返回的对象都带 id 字段，动作参数必须使用这些 id，禁止猜测）。get_market 带 params={teamId} 时侦察指定球队的完整阵容、合同与选秀权——谈交易前先侦察对手
 - propose_trade：params = { partnerTeamId, givePlayerIds[], givePickIds[], receivePlayerIds[], receivePickIds[], pickProtections? }（partnerTeamId 用球队 teamId，其余用球员/选秀权的 id；pickProtections = {送出的首轮id: {x: N}} 可谈判前 N 顺位保护——保护的签价值打折但更容易成交/绕过选秀权限制）
-- respond_trade：params = { offerId, accept }（回应 inboundOffers 里 AI 球队的主动报价；accept=true 接受，false 拒绝）
+- respond_trade：params = { offerId, accept }（回应 inboundOffers 里 AI 球队的主动报价；accept=true 接受，false 拒绝；报价有约 4 天有效期 expiresOn，逾期对方撤回）
 - respond_offer_sheet：params = { sheetId, match }（回应 offerSheets 里对你受限自由球员的报价单；match=true 按报价单条款留人，false 放人）
 - extend_contract：params = { playerId, extraYears, avgSalary }（提前续约还剩 ≤2 年合同的我方球员：首年 ≤ 末年薪资140%、年限 ≥2、价格约要价 95%（≤25 岁新星不打折）；锁定他免于进自由市场）
 - set_rotation：params = { starters: [5 个球员 id], minutes?: {球员id: 分钟} }（设定首发与上场时间；伤停球员不能首发；轮换深度影响战绩与士气）
@@ -969,7 +988,7 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
           toolResult = toolGetAssets({ ...evalCtx });
           break;
         case "get_market":
-          toolResult = toolGetMarket({ ...evalCtx });
+          toolResult = toolGetMarket({ ...evalCtx }, params);
           break;
         case "propose_trade":
           toolResult = toolProposeTrade({ ...evalCtx }, params);

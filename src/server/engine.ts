@@ -1842,6 +1842,8 @@ export function runAiTradeMarket(saveId: string, diag?: Record<string, number>, 
           fromTeam: seller.abbr,
           playerId: vet.id,
           asks: [...asks.map((p) => ({ kind: "PLAYER" as const, id: p.id })), ...(userFirst ? [{ kind: "PICK" as const, id: userFirst.id }] : [])],
+          // A phone call doesn't stay open forever — the offer lapses.
+          expiresOn: isoAddDays(save.currentDate, 4),
         };
         db.update(saves)
           .set({ phaseState: { ...psNow, inboundOffers: [offer] } as never, updatedAt: now() })
@@ -1862,12 +1864,14 @@ interface InboundOffer {
   fromTeam: string;
   playerId: string;
   asks: { kind: "PLAYER" | "PICK"; id: string }[];
+  expiresOn?: string;
 }
 
 export function listInboundOffers(saveId: string): (InboundOffer & { playerName: string; askNames: string[] })[] {
   const db = getDb();
   const ps = getPhaseState(saveId);
-  const offers = (ps.inboundOffers as InboundOffer[] | undefined) ?? [];
+  const today = getSave(saveId)?.currentDate ?? "";
+  const offers = ((ps.inboundOffers as InboundOffer[] | undefined) ?? []).filter((o) => !o.expiresOn || o.expiresOn >= today);
   const full = (id: string) => (id.includes(":") ? id : `${saveId}:${id}`);
   return offers.map((o) => {
     const p = db.select().from(playersT).where(eq(playersT.id, full(o.playerId))).get();
@@ -1889,6 +1893,15 @@ export function respondInboundOffer(saveId: string, offerId: string, accept: boo
   const offers = (ps.inboundOffers as InboundOffer[] | undefined) ?? [];
   const offer = offers.find((o) => o.id === offerId);
   if (!offer) throw new EngineError("NO_OFFER", "该报价不存在或已过期");
+  const today = getSave(saveId)!.currentDate;
+  if (offer.expiresOn && offer.expiresOn < today) {
+    db.update(saves)
+      .set({ phaseState: { ...ps, inboundOffers: offers.filter((o) => o.id !== offerId) } as never, updatedAt: now() })
+      .where(eq(saves.id, saveId))
+      .run();
+    logEvent(saveId, "TRADE", `${offer.fromTeam} 撤回了交易报价（逾期未答复）`, { offerId });
+    throw new EngineError("NO_OFFER", "该报价已过期——对方已撤回");
+  }
   const userShort = String(ps.userTeamId ?? "").split(":").pop()!;
   const season = getSave(saveId)!.season;
 
