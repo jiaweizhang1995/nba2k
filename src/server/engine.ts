@@ -450,6 +450,9 @@ export function persistState(state: LeagueState, extra?: { phaseState?: Record<s
           teamId: p.teamId ? full(p.teamId) : null,
           age: p.age,
           yearsPro: p.yearsPro,
+          // contract must persist too — prepareDraft rewrites it when players
+          // re-sign; without this they keep stale expired deals and play free.
+          contract: p.contract,
           ratings: {
             overall: p.ratings.overall,
             inside: p.ratings.inside,
@@ -720,7 +723,11 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
       p.contract = {
         type: overall >= 86 ? "MAX" : "VETERAN",
         years: Array.from({ length: newYears }, (_, i) => ({ season: newSeason + i, salary: Math.round(base * (1 + i * 0.05) * 10) / 10 })),
-      } as LeaguePlayer["contract"];
+        birdRights: true,
+        noTrade: false,
+        option: null,
+        signedSeason: state.season,
+      };
       resigned++;
     } else {
       p.teamId = null;
@@ -744,10 +751,22 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
   const order = [...state.teams].sort((a, b) => a.wins - b.wins || (a.abbr < b.abbr ? -1 : 1));
   const worst14 = order.slice(0, 14).map((t) => t.id);
   const lotteryResult = runLottery(state.seed, state.season, [...worst14, ...order.slice(14).map((t) => t.id)]);
-  // Draft order: round 1 = lottery order; round 2 = reverse standings
+  // Draft order: round 1 = lottery order; round 2 = reverse standings.
+  // Slot ownership follows the pick rows, not standings — a traded pick's
+  // holder picks in the original team's slot (otherwise traded picks never
+  // convey and makeDraftPick deadlocks on slots no pick row can fill).
+  const db2 = getDb();
+  const pickHolder = (round: number, origShort: string): string => {
+    const row = db2
+      .select({ holder: picksT.holderTeamId })
+      .from(picksT)
+      .where(and(eq(picksT.saveId, state.saveId), eq(picksT.year, newSeason), eq(picksT.round, round), eq(picksT.originalTeamId, `${state.saveId}:${origShort}`)))
+      .get();
+    return row ? row.holder.split(":").slice(1).join(":") : origShort;
+  };
   const round1 = lotteryResult;
   const round2 = order.map((t) => t.id);
-  const draftOrder = [...round1.map((id, i) => ({ pickNumber: i + 1, round: 1, holderTeamId: id })), ...round2.map((id, i) => ({ pickNumber: i + 1, round: 2, holderTeamId: id }))];
+  const draftOrder = [...round1.map((id, i) => ({ pickNumber: i + 1, round: 1, holderTeamId: pickHolder(1, id) })), ...round2.map((id, i) => ({ pickNumber: i + 1, round: 2, holderTeamId: pickHolder(2, id) }))];
 
   state.phase = "DRAFT";
   state.season = newSeason;
@@ -1392,6 +1411,16 @@ export function startNewSeason(saveId: string) {
     const prevPs = (save.phaseState as Record<string, unknown> | null) ?? {};
     const carried: Record<string, unknown> = {};
     if (prevPs.userTeamId) carried.userTeamId = prevPs.userTeamId;
+    // Dead money survives the season rollover — prune only fully-expired
+    // entries (those below the new season), keep the rest on the books.
+    if (prevPs.deadCap) {
+      const live: Record<string, { season: number; salary: number }[]> = {};
+      for (const [tid, entries] of Object.entries(prevPs.deadCap as Record<string, { season: number; salary: number }[]>)) {
+        const kept = (entries ?? []).filter((e) => e.season >= save.season);
+        if (kept.length) live[tid] = kept;
+      }
+      if (Object.keys(live).length) carried.deadCap = live;
+    }
 
     tx.update(saves)
       .set({ season: save.season, phase: "REGULAR_SEASON", currentDate: `${save.season - 1}-10-21`, phaseState: carried as never, updatedAt: now() })

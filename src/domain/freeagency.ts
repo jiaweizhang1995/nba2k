@@ -38,9 +38,11 @@ export function canAfford(team: TradeTeam, avgSalary: number, rosterAfter: numbe
     if (avgSalary <= snap.capSpace) return { ok: true, reason: "使用薪资空间" };
     return { ok: false, reason: `薪资空间不足（剩余 ${snap.capSpace.toFixed(1)}M，报价 ${avgSalary.toFixed(1)}M）` };
   }
+  // 底薪特例先于土豪线拦截：二奢球队唯一能用的签约工具就是底薪，
+  // 若先判 overSecondApron 连底薪都会被拒（与提示文案矛盾）。
+  if (avgSalary <= CBA.minimumSalary + 0.01) return { ok: true, reason: "使用底薪特例" };
   if (snap.overSecondApron) return { ok: false, reason: "球队超过第二土豪线，只能签底薪" };
   const mle = snap.overFirstApron ? CBA.minimumSalary : 12.8;
-  if (avgSalary <= CBA.minimumSalary + 0.01) return { ok: true, reason: "使用底薪特例" };
   if (avgSalary <= mle) return { ok: true, reason: `使用中产特例（上限 ${mle.toFixed(1)}M）` };
   return { ok: false, reason: "球队在工资帽以上且特例不足以匹配报价" };
 }

@@ -3,7 +3,7 @@
 
 import { rngFor } from "../rng";
 import { simulateGame, type SimPlayer, type RotationConfig } from "./game";
-import type { SeasonPhase, GameType } from "../types";
+import type { SeasonPhase, GameType, Contract } from "../types";
 
 export const SEASON_SIM_VERSION = "SEASON-SIM v2.0";
 
@@ -29,7 +29,7 @@ export interface LeaguePlayer {
   tenure: number;
   ratings: { overall: number; threePoint: number; finishing: number; inside: number; freeThrow: number; playmaking: number; rebounding: number; perimeterD: number; interiorD: number; usageTendency: number; potential: number | null; potentialLow: number | null; potentialHigh: number | null; confidence: number };
   seasonStats: { g: number; mp: number; pts: number; reb: number; ast: number; stl: number; blk: number; tov: number; fgm: number; fga: number; tpm: number; tpa: number; ftm: number; fta: number }[];
-  contract: { years: { season: number; salary: number }[]; type: string };
+  contract: Contract;
   status: string;
   role: string;
   satisfaction: number;
