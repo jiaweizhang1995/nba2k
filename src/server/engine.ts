@@ -831,6 +831,15 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
     const uid = getPhaseState(state.saveId).userTeamId as string | undefined;
     return uid ? stripId(uid) : null;
   })();
+  // Committed salary per team (non-expiring deals) — apron teams can't
+  // actually afford to keep everyone; that's how stars reach the market.
+  const moneyNext = seasonMoney(newSeason);
+  const committed = new Map<string, number>();
+  for (const p of state.players) {
+    if (!p.teamId) continue;
+    const end = p.contract.years.length ? p.contract.years[p.contract.years.length - 1].season : 0;
+    if (end >= newSeason) committed.set(p.teamId, (committed.get(p.teamId) ?? 0) + (p.contract.years.find((y) => y.season >= newSeason)?.salary ?? 0));
+  }
   let resigned = 0;
   let enteredFa = 0;
   let userExpired = 0;
@@ -871,7 +880,14 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
       enteredFa++;
       continue;
     }
-    const keepProb = overall >= 85 ? 0.9 : overall >= 72 ? 0.8 : 0.62;
+    let keepProb = overall >= 85 ? 0.9 : overall >= 72 ? 0.8 : 0.62;
+    // Apron reality: a team already over the second apron without him can't
+    // pay his ask — the player walks (or takes the minimum). Disgruntled
+    // players want out regardless of the offer.
+    const ask = askingSalaryFor(p.contract, p.yearsPro, overall, p.age, newSeason);
+    if ((committed.get(p.teamId) ?? 0) > moneyNext.secondApron && ask > moneyNext.minimumSalary + 0.01) keepProb -= 0.35;
+    if (p.satisfaction < 35) keepProb -= 0.3;
+    keepProb = Math.max(0.05, keepProb);
     if (rng.chance(keepProb)) {
       const newYears = rng.int(2, 4);
       // Re-sign at market value — a star leaving a rookie deal commands real
@@ -1232,12 +1248,18 @@ export function executeTrade(saveId: string, parties: TradeParty[], opts: { godM
     }
 
     // Roles & satisfaction adjustments after trade
+    const movedIds = new Set(assignments.keys());
     for (const party of parties) {
       const roster = tx.select().from(playersT).where(and(eq(playersT.saveId, saveId), eq(playersT.teamId, `${saveId}:${party.teamId}`))).all();
       const sorted = [...roster].sort((a, b) => b.ratings.overall - a.ratings.overall);
       sorted.forEach((p, i) => {
         const role = i === 0 && p.ratings.overall >= 86 ? "STAR" : i === 1 && p.ratings.overall >= 84 ? "STAR" : i < 5 ? "STARTER" : i === 5 && p.ratings.overall >= 79 ? "SIXTH_MAN" : i < 10 ? "ROTATION" : "BENCH";
-        const newSat = Math.max(20, Math.min(95, p.satisfaction - (p.role !== role ? 6 : 0)));
+        // Fresh-start bump: a player who just moved wanted out or wanted a
+        // new scene — morale rebounds toward ~60. Staying players take the
+        // role-shuffle hit instead.
+        const newSat = movedIds.has(p.id.split(":").slice(1).join(":"))
+          ? Math.min(95, Math.max(p.satisfaction, 55))
+          : Math.max(20, Math.min(95, p.satisfaction - (p.role !== role ? 6 : 0)));
         tx.update(playersT).set({ role, satisfaction: newSat }).where(eq(playersT.id, p.id)).run();
       });
     }
@@ -2063,6 +2085,32 @@ export function startNewSeason(saveId: string) {
           .run();
         logEvent(saveId, "FA", `阵容不足 ${CBA.minRosterSize} 人，自动底薪签下 ${pick.name}`, { playerId: pick.id });
       }
+    }
+
+    // AI cut-down day: the same rule the user faces — opening-night rosters
+    // can't exceed the max. Deep-bench bodies get waived into the pool;
+    // their remaining guarantees become dead money on the AI team's books.
+    const deadCap = { ...((getPhaseState(saveId).deadCap as Record<string, { season: number; salary: number }[]>) ?? {}) };
+    let aiCut = 0;
+    for (const t of tx.select().from(teamsT).where(eq(teamsT.saveId, saveId)).all().filter((x) => x.id !== userTeamFullId)) {
+      for (;;) {
+        const roster = tx.select().from(playersT).where(and(eq(playersT.saveId, saveId), eq(playersT.teamId, t.id))).all()
+          .filter((p) => p.status === "ACTIVE" || p.status === "INJURED");
+        if (roster.length <= CBA.maxRosterSize) break;
+        const victim = roster.sort((a, b) => a.ratings.overall - b.ratings.overall || (a.contract.years[0]?.salary ?? 0) - (b.contract.years[0]?.salary ?? 0))[0];
+        const short = shortId(t.id);
+        const owed = victim.contract.years.filter((y) => y.season >= save.season);
+        if (owed.length) deadCap[short] = [...(deadCap[short] ?? []), ...owed];
+        tx.update(playersT).set({ teamId: null, status: "FREE_AGENT", role: "BENCH" }).where(eq(playersT.id, victim.id)).run();
+        aiCut++;
+      }
+    }
+    if (aiCut > 0) {
+      tx.update(saves)
+        .set({ phaseState: { ...getPhaseState(saveId), deadCap } as never, updatedAt: now() })
+        .where(eq(saves.id, saveId))
+        .run();
+      logEvent(saveId, "FA", `裁员日：AI 球队裁掉 ${aiCut} 人至名单上限`, { cuts: aiCut });
     }
 
     // AI roster completion: once the user's free-agency window closes, AI

@@ -235,6 +235,8 @@ function teamRoster(evalRow: { saveId: string; teamFullId: string; season?: numb
       endSeason,
       expiring: endSeason <= season,
       injured: !!(p.injury && p.injury.weeksRemaining > 0),
+      injuryWeeks: p.injury?.weeksRemaining ?? 0,
+      stamina: Math.round(p.stamina * 100),
       noTrade: p.contract.noTrade,
       // Morale signal: losing teams and buried talent erode satisfaction;
       // a disgruntled star is a trade-demand waiting to happen.
