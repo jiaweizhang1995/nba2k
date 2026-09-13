@@ -645,6 +645,14 @@ export function advanceSim(saveId: string, mode: AdvanceMode, marketDiag?: Recor
         .run();
       deadlineDone = true;
       state = loadLeagueState(saveId);
+      // A live inbound offer pauses the advance — the GM gets the call and
+      // must answer before play resumes (offers expire in days).
+      if (
+        (mode === "DAY" || mode === "WEEK" || mode === "MONTH") &&
+        listInboundOffers(saveId).length > 0
+      ) {
+        break;
+      }
     }
     if (mode === "NEXT_GAME" && userTeamId) {
       const userPlayed = report.results.some((r) => {
@@ -1837,11 +1845,11 @@ export function runAiTradeMarket(saveId: string, diag?: Record<string, number>, 
         // The seller offered it — verify they'd actually accept their own ask.
         if (!aiEvaluateTrade(parties[0], { saveId, parties }, [seller, user], season).accept) { bump("offer_seller_reject"); continue; }
         bump("offer_created");
-        const offer = {
+        const offer: InboundOffer = {
           id: uuid(),
           fromTeam: seller.abbr,
-          playerId: vet.id,
-          asks: [...asks.map((p) => ({ kind: "PLAYER" as const, id: p.id })), ...(userFirst ? [{ kind: "PICK" as const, id: userFirst.id }] : [])],
+          gives: [{ kind: "PLAYER", id: vet.id }],
+          wants: [...asks.map((p) => ({ kind: "PLAYER" as const, id: p.id })), ...(userFirst ? [{ kind: "PICK" as const, id: userFirst.id }] : [])],
           // A phone call doesn't stay open forever — the offer lapses.
           expiresOn: isoAddDays(save.currentDate, 4),
         };
@@ -1854,6 +1862,68 @@ export function runAiTradeMarket(saveId: string, diag?: Record<string, number>, 
         break;
         }
       }
+      // Second direction: when the USER is seller-profile (bad record or a
+      // disgruntled star), a contender calls for the user's vet. Sell-high
+      // judgment at the deadline is a real GM skill.
+      if (!offerMade) {
+        const userRow = db.select().from(teamsT).where(eq(teamsT.id, userFullId)).get();
+        const userSellerProfile = !!userRow && (winPct(userRow) < 0.4 || disgruntledHosts.has(userFullId));
+        const vet = user.players
+          .filter((p) => !p.contract.noTrade && p.age >= 27 && p.ratings.overall >= 76 && contractEndSeason(p.contract) >= season)
+          .sort((a, b) => playerValue(b, season).value - playerValue(a, season).value)[0];
+        if (userSellerProfile && vet) {
+          const vetSal = salaryForSeason(vet.contract, 0);
+          for (const bRow of buyers) {
+            if (used.has(bRow.id)) continue;
+            const buyer = toTradeTeam(saveId, shortOf(bRow.id));
+            const bSnap = capSnapshot(buyer.players.map((p) => ({ contract: p.contract })), buyer.players.length, buyer.deadMoney ?? 0, season);
+            const ceiling = !bSnap.overCap ? Infinity : bSnap.overSecondApron ? vetSal + 0.1 : vetSal <= 9.8 ? vetSal * CBA.tradeBand1 + 0.1 : vetSal * CBA.tradeBand2 + 0.1;
+            const floor = !bSnap.overCap ? 0 : bSnap.overSecondApron ? vetSal - 0.1 : vetSal / CBA.tradeBand2 - 0.1;
+            const untouchable = new Set([...buyer.players].sort((a, b) => b.ratings.overall - a.ratings.overall).slice(0, 2).map((p) => p.id));
+            const movable = buyer.players
+              .filter((p) => !untouchable.has(p.id) && !p.contract.noTrade)
+              .sort((a, b) => salaryForSeason(b.contract, 0) - salaryForSeason(a.contract, 0));
+            const pkg: TradePlayer[] = [];
+            let sal = 0;
+            for (const p of movable) {
+              if (pkg.length >= 4 || sal >= floor) break;
+              if (sal + salaryForSeason(p.contract, 0) > ceiling) continue;
+              pkg.push(p);
+              sal += salaryForSeason(p.contract, 0);
+            }
+            const buyerFirst = buyer.picks
+              .filter((pk) => pk.status === "OWNED" && pk.round === 1 && pk.originalTeamId === buyer.id && pk.year > season && pk.year <= season + CBA.pickTradeYears && (!pk.protection || pk.protection.type === "NONE"))
+              .sort((a, b) => a.year - b.year)[0];
+            const givesAssets = [...pkg.map((p) => ({ kind: "PLAYER" as const, id: p.id })), ...(buyerFirst ? [{ kind: "PICK" as const, id: buyerFirst.id }] : [])];
+            const parties: TradeParty[] = [
+              { teamId: buyer.id, gives: givesAssets, receives: [{ kind: "PLAYER", id: vet.id }] },
+              { teamId: user.id, gives: [{ kind: "PLAYER", id: vet.id }], receives: givesAssets },
+            ];
+            if (sal < floor) { bump("buy_offer_no_salary"); continue; }
+            // No serious buyer calls for a vet without a first or a real
+            // young piece — insulting offers don't get made.
+            if (!buyerFirst && !pkg.some((p) => p.age <= 25 && p.ratings.overall >= 70)) { bump("buy_offer_insulting"); continue; }
+            const validation = validateTrade({ saveId, parties }, [buyer, user], season);
+            if (!validation.legal) { bump("buy_offer_illegal"); continue; }
+            if (!aiEvaluateTrade(parties[0], { saveId, parties }, [buyer, user], season).accept) { bump("buy_offer_buyer_reject"); continue; }
+            bump("buy_offer_created");
+            const offer: InboundOffer = {
+              id: uuid(),
+              fromTeam: buyer.abbr,
+              gives: givesAssets,
+              wants: [{ kind: "PLAYER", id: vet.id }],
+              expiresOn: isoAddDays(save.currentDate, 4),
+            };
+            db.update(saves)
+              .set({ phaseState: { ...getPhaseState(saveId), inboundOffers: [offer] } as never, updatedAt: now() })
+              .where(eq(saves.id, saveId))
+              .run();
+            logEvent(saveId, "TRADE", `交易报价：${buyer.abbr} 想收购你的 ${vet.name}，出价 ${pkg.map((p) => p.name).join("、")}${buyerFirst ? " + 一枚首轮签" : ""}`, { offerId: offer.id });
+            offerMade = true;
+            break;
+          }
+        }
+      }
     }
   }
   return trades;
@@ -1862,28 +1932,36 @@ export function runAiTradeMarket(saveId: string, diag?: Record<string, number>, 
 interface InboundOffer {
   id: string;
   fromTeam: string;
-  playerId: string;
-  asks: { kind: "PLAYER" | "PICK"; id: string }[];
+  /** Assets the AI team sends the user (players + picks). */
+  gives: { kind: "PLAYER" | "PICK"; id: string }[];
+  /** Assets the AI team wants back from the user. */
+  wants: { kind: "PLAYER" | "PICK"; id: string }[];
   expiresOn?: string;
+  /** Legacy shape from before bidirectional offers. */
+  playerId?: string;
+  asks?: { kind: "PLAYER" | "PICK"; id: string }[];
 }
 
-export function listInboundOffers(saveId: string): (InboundOffer & { playerName: string; askNames: string[] })[] {
+export function listInboundOffers(saveId: string): (InboundOffer & { giveNames: string[]; wantNames: string[] })[] {
   const db = getDb();
   const ps = getPhaseState(saveId);
   const today = getSave(saveId)?.currentDate ?? "";
-  const offers = ((ps.inboundOffers as InboundOffer[] | undefined) ?? []).filter((o) => !o.expiresOn || o.expiresOn >= today);
-  const full = (id: string) => (id.includes(":") ? id : `${saveId}:${id}`);
-  return offers.map((o) => {
-    const p = db.select().from(playersT).where(eq(playersT.id, full(o.playerId))).get();
-    const askNames = o.asks.map((a) => {
-      if (a.kind === "PICK") {
-        const pk = db.select().from(picksT).where(eq(picksT.id, full(a.id))).get();
-        return pk ? `${pk.year} 年${pk.round === 1 ? "首轮" : "次轮"}签` : "选秀权";
-      }
-      return db.select().from(playersT).where(eq(playersT.id, full(a.id))).get()?.name ?? a.id;
+  const offers = ((ps.inboundOffers as InboundOffer[] | undefined) ?? [])
+    .filter((o) => !o.expiresOn || o.expiresOn >= today)
+    .map((o) => {
+      // Normalize the legacy one-directional shape.
+      if (!o.gives && o.playerId) return { ...o, gives: [{ kind: "PLAYER" as const, id: o.playerId }], wants: o.asks ?? [] };
+      return { ...o, gives: o.gives ?? [], wants: o.wants ?? o.asks ?? [] };
     });
-    return { ...o, playerName: p?.name ?? "?", askNames };
-  });
+  const full = (id: string) => (id.includes(":") ? id : `${saveId}:${id}`);
+  const nameOf = (a: { kind: "PLAYER" | "PICK"; id: string }) => {
+    if (a.kind === "PICK") {
+      const pk = db.select().from(picksT).where(eq(picksT.id, full(a.id))).get();
+      return pk ? `${pk.year} 年${pk.round === 1 ? "首轮" : "次轮"}签` : "选秀权";
+    }
+    return db.select().from(playersT).where(eq(playersT.id, full(a.id))).get()?.name ?? a.id;
+  };
+  return offers.map((o) => ({ ...o, giveNames: o.gives.map(nameOf), wantNames: o.wants.map(nameOf) }));
 }
 
 /** The user answers an inbound AI offer. Accept → full validation + execution. */
@@ -1916,16 +1994,20 @@ export function respondInboundOffer(saveId: string, offerId: string, accept: boo
     logEvent(saveId, "TRADE", `拒绝了 ${offer.fromTeam} 的交易报价`, { offerId });
     return { accepted: false as const };
   }
-  const seller = toTradeTeam(saveId, offer.fromTeam);
+  const aiTeam = toTradeTeam(saveId, offer.fromTeam);
   const user = toTradeTeam(saveId, userShort);
+  // Normalize both shapes: gives = what the AI team sends, wants = what it
+  // asks back. Works for either call direction (they sell / they buy).
+  const gives = offer.gives ?? (offer.playerId ? [{ kind: "PLAYER" as const, id: offer.playerId }] : []);
+  const wants = offer.wants ?? offer.asks ?? [];
   const parties: TradeParty[] = [
-    { teamId: seller.id, gives: [{ kind: "PLAYER", id: offer.playerId }], receives: offer.asks },
-    { teamId: user.id, gives: offer.asks, receives: [{ kind: "PLAYER", id: offer.playerId }] },
+    { teamId: aiTeam.id, gives, receives: wants },
+    { teamId: user.id, gives: wants, receives: gives },
   ];
   const saveNow = getSave(saveId)!;
   // The offer was struck at the deadline — validate it as-of that date so the
   // WINDOW rule doesn't retroactively kill a live offer the GM is answering.
-  const validation = validateTrade({ saveId, parties }, [seller, user], season, { phase: saveNow.phase, date: `${season}-02-06` });
+  const validation = validateTrade({ saveId, parties }, [aiTeam, user], season, { phase: saveNow.phase, date: `${season}-02-06` });
   if (!validation.legal) {
     clear();
     const msg = validation.issues.find((i) => i.severity === "BLOCKER")?.message ?? "交易不再合法";

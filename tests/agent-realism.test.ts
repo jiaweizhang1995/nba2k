@@ -774,8 +774,8 @@ describe("inbound trade offers", () => {
     const offers = listInboundOffers(s.saveId);
     expect(offers.length).toBeGreaterThanOrEqual(1);
     const offer = offers.find((o) => o.id === "inj-offer-1") ?? offers[0];
-    expect(offer.playerName).not.toBe("?");
-    expect(offer.asks.length).toBeGreaterThan(0);
+    expect(offer.giveNames[0]).not.toBe("?");
+    expect(offer.wants.length).toBeGreaterThan(0);
     const res = respondInboundOffer(s.saveId, offer.id, true);
     expect(res.accepted).toBe(true);
     expect(listInboundOffers(s.saveId).filter((o) => o.id === offer.id)).toHaveLength(0);

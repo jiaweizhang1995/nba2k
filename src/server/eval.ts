@@ -622,7 +622,7 @@ function buildObservation(evalRow: { saveId: string; teamFullId: string; teamSho
     // Players whose contract ends this offseason — they enter the market and
     // we hold Bird rights (re-signable over the cap). Plan before FA opens.
     expiringThisOffseason: fullRoster.filter((p) => p.expiring).map((p) => ({ id: p.id, name: p.name, overall: p.overall, salary: p.salary })),
-    inboundOffers: listInboundOffers(evalRow.saveId).map((o) => ({ offerId: o.id, fromTeam: o.fromTeam, theyGive: o.playerName, theyWant: o.askNames, expiresOn: o.expiresOn })),
+    inboundOffers: listInboundOffers(evalRow.saveId).map((o) => ({ offerId: o.id, fromTeam: o.fromTeam, theyGive: o.giveNames, theyWant: o.wantNames, expiresOn: o.expiresOn })),
     // Offer sheets on YOUR restricted free agents — match (respond_offer_sheet)
     // or lose him when the sheet expires.
     offerSheets: listOfferSheets(evalRow.saveId).map((s) => ({ sheetId: s.id, playerId: shortId(s.playerId), fromTeam: shortId(s.fromTeamId), salary: s.salary, years: s.years, expiresOn: s.expiresOn })),
@@ -895,15 +895,18 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
       inboundGood: (() => {
         const o = listInboundOffers(evalRow.saveId)[0];
         if (!o) return false;
-        const incoming = db.select().from(playersT).where(eq(playersT.id, o.playerId)).get()?.ratings.overall ?? 0;
-        const out = o.asks
-          .filter((a) => a.kind === "PLAYER")
-          .map((a) => db.select().from(playersT).where(eq(playersT.id, a.id)).get()?.ratings.overall ?? 0);
-        const givesPick = o.asks.some((a) => a.kind === "PICK");
-        // crude stub judgment: incoming star clearly better than outgoing
-        // package average, and no first given for a non-star.
-        const avgOut = out.length ? out.reduce((a, x) => a + x, 0) / out.length : 0;
-        return incoming - avgOut >= 4 && !(givesPick && incoming < 84);
+        const ovrOf = (a: { kind: string; id: string }) =>
+          a.kind === "PICK" ? 0 : (db.select().from(playersT).where(eq(playersT.id, a.id)).get()?.ratings.overall ?? 0);
+        // Bidirectional: compare what we'd get vs what we'd send. A first
+        // counts as ~78 ovr of asset value; picks received count for us.
+        const inBest = Math.max(0, ...o.gives.map(ovrOf));
+        const outBest = Math.max(0, ...o.wants.map(ovrOf));
+        const inPicks = o.gives.filter((a) => a.kind === "PICK").length;
+        const outPicks = o.wants.filter((a) => a.kind === "PICK").length;
+        // Crude stub judgment: we get the best asset and at least break even
+        // on pick flow — a sell-high offer (our vet for a first) reads good
+        // when we're bad, bad when contending is crudely ignored here.
+        return inBest + inPicks * 6 >= outBest + outPicks * 6;
       })(),
       tradeAttempted:
         db
