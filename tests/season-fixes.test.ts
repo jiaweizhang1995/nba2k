@@ -13,7 +13,6 @@ import {
   getSave,
   makeDraftPick,
   startNewSeason,
-  submitFaOffer,
   waivePlayer,
 } from "@/server/engine";
 import { generateDraftClass } from "@/domain/draft";
@@ -88,29 +87,35 @@ describe("free agency fairness + roster fill", () => {
 
   it("waive frees a roster spot but leaves honest dead money on the cap", () => {
     const db = getDb();
-    // Since the fix, the user's own expiring players reach free agency — the
-    // roster may sit at the 13-man floor. Sign a cheap body first so the
-    // waive doesn't breach the minimum.
-    const tried = new Set<string>();
-    for (;;) {
-      const cur = db
-        .select()
-        .from(playersT)
-        .where(and(eq(playersT.saveId, saveId), eq(playersT.teamId, `${saveId}:${userShort}`)))
-        .all();
-      if (cur.length > CBA.minRosterSize) break;
+    // The live market may have churned the pool dry during the season — the
+    // waive test only needs one warm body, so place a min-contract player
+    // directly instead of negotiating the open market.
+    const cur = db
+      .select()
+      .from(playersT)
+      .where(and(eq(playersT.saveId, saveId), eq(playersT.teamId, `${saveId}:${userShort}`)))
+      .all();
+    if (cur.length <= CBA.minRosterSize) {
       const fa = db
         .select()
         .from(playersT)
         .where(and(eq(playersT.saveId, saveId), eq(playersT.status, "FREE_AGENT")))
         .all()
-        .filter((p) => p.teamId === null && !tried.has(p.id))
+        .filter((p) => p.teamId === null)
         .sort((a, b) => a.ratings.overall - b.ratings.overall)[0];
-      if (!fa) break;
-      tried.add(fa.id);
-      // Young FAs demand 4-year deals; the accept rule needs ≥60% of ask.
-      // League minimum grows with the cap — use the save's current season.
-      submitFaOffer(saveId, fa.id.split(":").slice(1).join(":"), 3, seasonMoney(getSave(saveId)!.season).minimumSalary);
+      const season = getSave(saveId)!.season;
+      if (fa) {
+        db.update(playersT)
+          .set({
+            teamId: `${saveId}:${userShort}`,
+            lastTeamId: `${saveId}:${userShort}`,
+            status: "ACTIVE",
+            role: "BENCH",
+            contract: { type: "MINIMUM", years: [{ season, salary: seasonMoney(season).minimumSalary }], birdRights: false, noTrade: false, option: null, signedSeason: season },
+          })
+          .where(eq(playersT.id, fa.id))
+          .run();
+      }
     }
     const roster = db
       .select()

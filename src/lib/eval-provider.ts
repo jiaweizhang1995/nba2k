@@ -22,6 +22,7 @@ export const GM_ACTIONS = [
   "propose_trade",
   "respond_trade",
   "respond_offer_sheet",
+  "extend_contract",
   "set_rotation",
   "sign_free_agent",
   "waive_player",
@@ -37,9 +38,9 @@ export type GmAction = (typeof GM_ACTIONS)[number];
 
 /** 各阶段允许的动作（权限白名单 —— 权限测试的依据）。 */
 export const STAGE_ALLOWED_ACTIONS: Record<string, GmAction[]> = {
-  SEASON: ["get_roster", "get_assets", "get_market", "propose_trade", "respond_trade", "set_rotation", "sign_free_agent", "waive_player", "set_strategy", "advance_season", "do_nothing"],
+  SEASON: ["get_roster", "get_assets", "get_market", "propose_trade", "respond_trade", "extend_contract", "set_rotation", "sign_free_agent", "waive_player", "set_strategy", "advance_season", "do_nothing"],
   // Draft-night trades and roster trims are real NBA — both allowed here.
-  DRAFT: ["get_roster", "get_assets", "get_market", "propose_trade", "set_rotation", "waive_player", "draft_pick", "finish_draft", "do_nothing"],
+  DRAFT: ["get_roster", "get_assets", "get_market", "propose_trade", "extend_contract", "set_rotation", "waive_player", "draft_pick", "finish_draft", "do_nothing"],
   FREE_AGENCY: ["get_roster", "get_assets", "get_market", "propose_trade", "respond_offer_sheet", "set_rotation", "sign_free_agent", "waive_player", "start_new_season", "do_nothing"],
   DONE: [],
 };
@@ -217,6 +218,9 @@ interface StubScene {
   ownFaSigned?: boolean;
   offerSheetId?: string | null;
   offerSheetMatch?: boolean;
+  extensionId?: string | null;
+  extensionSalary?: number;
+  extensionsTried?: number;
 }
 
 /**
@@ -252,6 +256,13 @@ export function stubAction(scene: StubScene): GmActionPayload {
     }
     if (!scene.strategySet) {
       return base("记录球队策略", { action: "set_strategy", params: { text: "Stub 策略：保持薪资灵活，逐年补强轮换深度。" } });
+    }
+    // 每季最多尝试一次提前续约：把到期核心锁在市场外
+    if (scene.extensionId && (scene.extensionsTried ?? 0) <= scene.seasonsDone) {
+      return base("提前续约到期核心，避免进自由市场被抢", {
+        action: "extend_contract",
+        params: { playerId: scene.extensionId, extraYears: 3, avgSalary: scene.extensionSalary },
+      });
     }
     if (scene.needsRotation && scene.starterIds?.length === 5) {
       return base("按战力排定首发五虎", { action: "set_rotation", params: { starters: scene.starterIds } });

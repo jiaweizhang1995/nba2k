@@ -38,6 +38,7 @@ import {
   getDraftOrder,
   getPhaseState,
   getSave,
+  extendContract,
   listInboundOffers,
   listOfferSheets,
   loadLeagueState,
@@ -236,7 +237,11 @@ function teamRoster(evalRow: { saveId: string; teamFullId: string; season?: numb
       role: p.role,
       salary: p.contract.years[0]?.salary ?? 0,
       endSeason,
+      yearsLeft: p.contract.years.length,
       expiring: endSeason <= season,
+      // Extendable while ≤2 seasons remain — his camp's asking price/year.
+      extendable: p.contract.years.length >= 1 && p.contract.years.length <= 2,
+      extensionAsk: p.contract.years.length >= 1 && p.contract.years.length <= 2 ? askingSalaryFor(p.contract, p.yearsPro, p.ratings.overall, p.age, season) : null,
       injured: !!(p.injury && p.injury.weeksRemaining > 0),
       injuryWeeks: p.injury?.weeksRemaining ?? 0,
       stamina: Math.round(p.stamina * 100),
@@ -606,8 +611,9 @@ const SYSTEM_PROMPT = `你是篮球经理模拟游戏《HARDWOOD GM》中的球�
 - propose_trade：params = { partnerTeamId, givePlayerIds[], givePickIds[], receivePlayerIds[], receivePickIds[] }（partnerTeamId 用球队 teamId，其余用球员/选秀权的 id）
 - respond_trade：params = { offerId, accept }（回应 inboundOffers 里 AI 球队的主动报价；accept=true 接受，false 拒绝）
 - respond_offer_sheet：params = { sheetId, match }（回应 offerSheets 里对你受限自由球员的报价单；match=true 按报价单条款留人，false 放人）
+- extend_contract：params = { playerId, extraYears, avgSalary }（提前续约还剩 ≤2 年合同的我方球员：首年 ≤ 末年薪资140%、年限 ≥2、价格约要价 95%（≤25 岁新星不打折）；锁定他免于进自由市场）
 - set_rotation：params = { starters: [5 个球员 id], minutes?: {球员id: 分钟} }（设定首发与上场时间；伤停球员不能首发；轮换深度影响战绩与士气）
-- sign_free_agent：params = { playerId, years, avgSalary }（自由市场阶段按报价签约；常规赛期间只能签赛季剩余底薪合同，球员 id 来自 freeAgents[].id）
+- sign_free_agent：params = { playerId, years, avgSalary }（自由市场阶段按报价签约；常规赛期间只能签赛季剩余底薪合同，球员 id 来自 freeAgents[].id；注意 AI 球队也会在赛季中底薪补强伤病阵容——好货不等人）
 - waive_player：params = { playerId }（裁掉我方球员；剩余合同变为死钱仍占工资帽）
 - draft_pick：params = { prospectId? }（选秀阶段；prospectId 来自 topProspects[].id，省略则选最优）
 - finish_draft：剩余选秀全部自动完成
@@ -796,6 +802,24 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
           .from(evalTurnsT)
           .where(and(eq(evalTurnsT.evaluationId, evalRow.id), eq(evalTurnsT.turnIndex, evalRow.turnIndex)))
           .get()?.action === "sign_free_agent",
+      extensionId: (() => {
+        // Best extendable contributor (≤2 yrs left) worth locking up.
+        const cand = myPlayers
+          .filter((p) => p.contract.years.length >= 1 && p.contract.years.length <= 2 && p.ratings.overall >= 74)
+          .sort((a, b) => b.ratings.overall - a.ratings.overall)[0];
+        return cand ? shortId(cand.id) : null;
+      })(),
+      extensionSalary: (() => {
+        const cand = myPlayers
+          .filter((p) => p.contract.years.length >= 1 && p.contract.years.length <= 2 && p.ratings.overall >= 74)
+          .sort((a, b) => b.ratings.overall - a.ratings.overall)[0];
+        return cand ? askingSalaryFor(cand.contract, cand.yearsPro, cand.ratings.overall, cand.age, getSave(evalRow.saveId)?.season) : 0;
+      })(),
+      extensionsTried: db
+        .select()
+        .from(evalTurnsT)
+        .where(and(eq(evalTurnsT.evaluationId, evalRow.id), eq(evalTurnsT.action, "extend_contract")))
+        .all().length,
       offerSheetId: (() => {
         const s = listOfferSheets(evalRow.saveId)[0];
         return s ? s.id : null;
@@ -919,6 +943,15 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
             summary: r.accepted ? "接受了 AI 球队的交易报价，交易完成" : `报价处理：${(r as { reason?: string }).reason ?? "已拒绝"}`,
             isAction: true,
             legal: true,
+          };
+          break;
+        }
+        case "extend_contract": {
+          const r = extendContract(evalRow.saveId, String(params.playerId ?? ""), Number(params.extraYears ?? 0), Number(params.avgSalary ?? 0));
+          toolResult = {
+            summary: r.extended ? "提前续约达成" : `续约被拒：${(r as { reason?: string }).reason ?? "谈判破裂"}`,
+            isAction: true,
+            legal: r.extended,
           };
           break;
         }

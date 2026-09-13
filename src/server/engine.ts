@@ -622,6 +622,17 @@ export function advanceSim(saveId: string, mode: AdvanceMode, marketDiag?: Recor
       moraleMonth = report.date.slice(0, 7);
       applyMonthlyMorale(state);
     }
+    // In-season buyout/injury market: roughly weekly, AI teams with a thin
+    // healthy roster or a star on the shelf sign minimum-salary stopgaps.
+    // Same lever the user has via in-season sign_free_agent — symmetry.
+    if (state.phase === "REGULAR_SEASON" && ["01", "08", "15", "22"].includes(report.date.slice(8, 10))) {
+      persistState(state);
+      const n = runAiInSeasonSignings(saveId, report.date);
+      if (n > 0) {
+        result.notes.push(`赛季中签约：AI 球队底薪补强 ${n} 人`);
+        state = loadLeagueState(saveId);
+      }
+    }
     if (!deadlineDone && state.phase === "REGULAR_SEASON" && report.date >= deadlineDate) {
       persistState(state);
       const n = runAiTradeMarket(saveId, marketDiag, { deadline: true });
@@ -1720,7 +1731,9 @@ export function runAiTradeMarket(saveId: string, diag?: Record<string, number>, 
         const sellerSnap = capSnapshot(seller.players.map((p) => ({ contract: p.contract })), seller.players.length, seller.deadMoney ?? 0, season);
         const sellerSlack = Math.max(0, CBA.maxRosterSize - seller.players.length + 1);
         const userSlack = Math.max(0, user.players.length - CBA.minRosterSize + 1);
-        const askCap = Math.min(4, sellerSlack, userSlack);
+        // Up to 5 outgoing pieces — big multi-player deals are how real
+        // deadline packages reach a star's salary band.
+        const askCap = Math.min(5, sellerSlack, userSlack);
         // Min outgoing salary that legally matches `incoming` for the user,
         // and max incoming salary the seller can take back for `outgoing` —
         // both mirroring salaryMatching()'s bands. A deal needs
@@ -2634,6 +2647,157 @@ export function waivePlayer(saveId: string, playerId: string) {
   });
   logEvent(saveId, "ROSTER", `裁掉 ${player.name}：剩余 ${deadEntries.length} 年合同共 ${total.toFixed(1)}M 计入死钱`, { playerId, deadEntries, total });
   return { waived: player.name, deadMoney: deadEntries, total };
+}
+
+/**
+ * In-season AI signings: teams thin on healthy bodies — or with a star on
+ * the shelf for weeks — dip into the minimum-salary market. Contenders
+ * shop; tankers don't bother. Mirrors the user's in-season signing lever.
+ */
+function runAiInSeasonSignings(saveId: string, date: string): number {
+  const db = getDb();
+  const save = getSave(saveId);
+  if (!save || save.phase !== "REGULAR_SEASON") return 0;
+  const ps = getPhaseState(saveId);
+  const userFull = (ps.userTeamId as string | undefined) ?? null;
+  const rng = rngFor(save.seed, `inszn-fa:${save.season}:${date}`);
+  const money = seasonMoney(save.season);
+
+  const pool = db
+    .select()
+    .from(playersT)
+    .where(and(eq(playersT.saveId, saveId), eq(playersT.status, "FREE_AGENT")))
+    .all()
+    .filter((p) => p.teamId === null)
+    .sort((a, b) => b.ratings.overall - a.ratings.overall);
+  if (!pool.length) return 0;
+
+  const teams = db
+    .select()
+    .from(teamsT)
+    .where(eq(teamsT.saveId, saveId))
+    .all()
+    .filter((t) => t.id !== userFull)
+    .sort(() => rng.float(0, 1) - rng.float(0, 1));
+
+  let signed = 0;
+  const signedIds = new Set<string>();
+  for (const t of teams) {
+    if (signed >= 2) break;
+    const roster = db
+      .select()
+      .from(playersT)
+      .where(and(eq(playersT.saveId, saveId), eq(playersT.teamId, t.id)))
+      .all()
+      .filter((p) => p.status === "ACTIVE" || p.status === "INJURED");
+    if (roster.length >= CBA.maxRosterSize) continue;
+    const healthy = roster.filter((p) => p.status === "ACTIVE" && !(p.injury && p.injury.weeksRemaining > 0));
+    const starOut = roster.some((p) => p.ratings.overall >= 82 && p.injury && p.injury.weeksRemaining >= 4);
+    const thin = healthy.length < 13;
+    if (!thin && !starOut) continue;
+    // Rebuilders let it ride — the shopping list is a contender thing.
+    const urgency = t.aiPhase === "REBUILD" ? 0.25 : thin ? 0.85 : 0.6;
+    if (!rng.chance(urgency)) continue;
+    const c = pool.find((p) => !signedIds.has(p.id));
+    if (!c) break;
+    db.update(playersT)
+      .set({
+        teamId: t.id,
+        lastTeamId: t.id,
+        status: "ACTIVE",
+        role: "BENCH",
+        contract: {
+          type: "MINIMUM",
+          years: [{ season: save.season, salary: money.minimumSalary }],
+          birdRights: false,
+          noTrade: false,
+          option: null,
+          signedSeason: save.season,
+        },
+      })
+      .where(eq(playersT.id, c.id))
+      .run();
+    signedIds.add(c.id);
+    signed++;
+    logEvent(saveId, "FA", `${shortId(t.id)} 底薪签下 ${c.name}（赛季中补强）`, { playerId: c.id, teamId: t.id });
+  }
+  return signed;
+}
+
+/**
+ * Contract extension — lock up a player BEFORE he reaches free agency.
+ * Real CBA flavor: veterans are extendable with ≤2 seasons left; new money
+ * is appended after existing years (existing salary can't be renegotiated);
+ * the first extension year is capped at 140% of the final year's salary;
+ * stars take a small security discount (~5%) but young upside players bet
+ * on themselves and demand full asking. One extension window per player
+ * per season.
+ */
+export function extendContract(saveId: string, playerId: string, extraYears: number, avgSalary: number) {
+  const db = getDb();
+  const save = getSave(saveId);
+  if (!save) throw new EngineError("NO_SAVE", "存档不存在");
+  if (save.phase !== "REGULAR_SEASON" && save.phase !== "DRAFT" && save.phase !== "PLAYOFFS") {
+    throw new EngineError("WRONG_PHASE", "续约窗口在赛季中/选秀前（进入自由市场后请用签约）");
+  }
+  const ps = getPhaseState(saveId);
+  const userFull = (ps.userTeamId as string | undefined) ?? null;
+  const player = db.select().from(playersT).where(eq(playersT.id, `${saveId}:${playerId}`)).get();
+  if (!player || player.teamId !== userFull) throw new EngineError("NO_PLAYER", "球员不在你的阵容中");
+  const yearsLeft = player.contract.years.length;
+  if (yearsLeft < 1) throw new EngineError("NO_CONTRACT", "球员合同已到期——请走自由市场签约");
+  if (yearsLeft > 2) throw new EngineError("NOT_EXTENDABLE", `合同还剩 ${yearsLeft} 年——还剩 ≤2 年时才可提前续约`);
+  if (extraYears < 1 || extraYears > CBA.maxContractYears) throw new EngineError("BAD_TERMS", `续约年限 1-${CBA.maxContractYears}`);
+  if (yearsLeft + extraYears > CBA.maxContractYears + 1) {
+    throw new EngineError("BAD_TERMS", `续约后总长 ${yearsLeft + extraYears} 年超过上限 ${CBA.maxContractYears + 1} 年`);
+  }
+  const money = seasonMoney(save.season);
+  if (avgSalary < money.minimumSalary - 0.001) {
+    throw new EngineError("BAD_TERMS", `低于本赛季底薪 ${money.minimumSalary.toFixed(1)}M`);
+  }
+  const playerMax = maxContractValue(player.yearsPro, 1, save.season).firstYear;
+  if (avgSalary > playerMax + 0.001) {
+    throw new EngineError("BAD_TERMS", `超过顶薪上限 ${playerMax.toFixed(1)}M/年`);
+  }
+  // CBA: the first extension year can't exceed 140% of the final contract year.
+  const lastYearSalary = player.contract.years[yearsLeft - 1].salary;
+  if (avgSalary > lastYearSalary * 1.4 + 0.001) {
+    throw new EngineError("BAD_TERMS", `续约首年不得超过末年薪资的 140%（末年 ${lastYearSalary.toFixed(1)}M → 上限 ${(lastYearSalary * 1.4).toFixed(1)}M）`);
+  }
+  const extKey = `extended:${save.season}`;
+  const extended = new Set((ps[extKey] as string[] | undefined) ?? []);
+  if (extended.has(player.id)) throw new EngineError("ALREADY_EXTENDED", "本赛季已与其续约过——谈判不能反复");
+
+  // The player's price: market asking with a security discount — unless he's
+  // a young riser betting on himself, in which case it's full price.
+  const asking = askingSalaryFor(player.contract, player.yearsPro, player.ratings.overall, player.age, save.season);
+  const risingStar = player.age <= 25 && (player.ratings.potential ?? 0) > player.ratings.overall + 8;
+  const floor = asking * (risingStar ? 1.0 : 0.95);
+  const askingYears = Math.max(1, Math.min(4, player.age >= 32 ? 2 : 4));
+  if (avgSalary < floor - 0.001 || extraYears < Math.min(askingYears, 2)) {
+    logEvent(saveId, "FA", `续约谈判破裂：${player.name} 方要 ${floor.toFixed(1)}M/年起、至少 ${Math.min(askingYears, 2)} 年`, { playerId });
+    return {
+      extended: false as const,
+      reason: `${player.name} 拒绝了续约报价——要价约 ${asking.toFixed(1)}M/年${risingStar ? "（新星不打折）" : "（可接受约 95% 要价）"}、至少 ${Math.min(askingYears, 2)} 年`,
+      asking,
+    };
+  }
+
+  db.transaction((tx) => {
+    const lastSeason = player.contract.years[yearsLeft - 1].season;
+    const newYears = Array.from({ length: extraYears }, (_, i) => ({ season: lastSeason + 1 + i, salary: Math.round(avgSalary * 100) / 100 }));
+    tx.update(playersT)
+      .set({
+        contract: { ...player.contract, years: [...player.contract.years, ...newYears] },
+        satisfaction: Math.min(100, player.satisfaction + 5),
+      })
+      .where(eq(playersT.id, player.id))
+      .run();
+    extended.add(player.id);
+    tx.update(saves).set({ phaseState: { ...getPhaseState(saveId), [extKey]: [...extended] } as never, updatedAt: now() }).where(eq(saves.id, saveId)).run();
+  });
+  logEvent(saveId, "FA", `提前续约：${player.name} 续签 ${extraYears} 年 ${avgSalary.toFixed(1)}M/年（原合同剩 ${yearsLeft} 年）`, { playerId, extraYears, avgSalary });
+  return { extended: true as const, asking };
 }
 
 /** Respond to an offer sheet on your restricted free agent: match keeps him
