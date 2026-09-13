@@ -35,8 +35,9 @@ export type GmAction = (typeof GM_ACTIONS)[number];
 /** 各阶段允许的动作（权限白名单 —— 权限测试的依据）。 */
 export const STAGE_ALLOWED_ACTIONS: Record<string, GmAction[]> = {
   SEASON: ["get_roster", "get_assets", "get_market", "propose_trade", "waive_player", "set_strategy", "advance_season", "do_nothing"],
-  DRAFT: ["get_roster", "get_assets", "draft_pick", "finish_draft", "do_nothing"],
-  FREE_AGENCY: ["get_roster", "get_assets", "get_market", "sign_free_agent", "waive_player", "start_new_season", "do_nothing"],
+  // Draft-night trades and roster trims are real NBA — both allowed here.
+  DRAFT: ["get_roster", "get_assets", "get_market", "propose_trade", "waive_player", "draft_pick", "finish_draft", "do_nothing"],
+  FREE_AGENCY: ["get_roster", "get_assets", "get_market", "propose_trade", "sign_free_agent", "waive_player", "start_new_season", "do_nothing"],
   DONE: [],
 };
 
@@ -202,6 +203,11 @@ interface StubScene {
   strategySet?: boolean;
   seasonsDone: number;
   years: number;
+  rosterCount?: number;
+  waiveCandidateId?: string | null;
+  ownFaId?: string | null;
+  ownFaSalary?: number;
+  ownFaSigned?: boolean;
 }
 
 /**
@@ -237,6 +243,17 @@ export function stubAction(scene: StubScene): GmActionPayload {
     return base("选择最佳可用新秀", { action: "draft_pick", params: {} });
   }
   if (scene.stage === "FREE_AGENCY") {
+    // 超员先裁员（常规赛开打前名单必须 ≤18）
+    if ((scene.rosterCount ?? 0) > 18 && scene.waiveCandidateId) {
+      return base("裁掉阵容末端球员以满足名单上限", { action: "waive_player", params: { playerId: scene.waiveCandidateId } });
+    }
+    // 自家到期球员优先用鸟权续约一次
+    if (scene.ownFaId && !scene.ownFaSigned && !scene.lastTurnWasSignAttempt) {
+      return base("用鸟权续约自家到期球员", {
+        action: "sign_free_agent",
+        params: { playerId: scene.ownFaId, years: 3, avgSalary: scene.ownFaSalary },
+      });
+    }
     // 已签成功，或上一回合已尝试过签约（无目标/被拒）→ 推进新赛季（只尝试一次，避免空转）
     if (!scene.hasSignedThisStage && !scene.lastTurnWasSignAttempt) {
       return base("尝试签下一名自由球员补强", { action: "sign_free_agent", params: { mode: "stub_cheapest" } });

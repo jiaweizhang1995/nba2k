@@ -17,7 +17,9 @@ export function classifyTeamPhase(avgOverall: number, avgAge: number, wins: numb
   if (winPct >= 0.52) {
     return { phase: "PLAYOFF", risk: 0.5, description: "季后赛球队：平衡现在与未来" };
   }
-  if (winPct >= 0.41 || avgAge <= 25.5) {
+  // A young team winning <41% is tanking, not "on the bubble" — youth is a
+  // reason to keep rebuilding, not evidence of competitiveness.
+  if (winPct >= 0.41) {
     return { phase: "BUBBLE", risk: 0.6, description: "附加赛边缘：寻找突破口，适度冒险" };
   }
   const pickHoarder = picksOwned >= 4;

@@ -1,0 +1,1 @@
+ALTER TABLE `players` ADD `last_team_id` text;

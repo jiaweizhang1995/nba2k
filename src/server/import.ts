@@ -196,6 +196,10 @@ export async function importData(saveId: string, payload: ImportPayload): Promis
         ratings = blendWithMarketEstimate(ratings, salaryM, position, p.age || 25, p.externalId, sampleMpg);
       }
       const teamFullId = p.teamAbbr ? teamIdByAbbr.get(p.teamAbbr.toUpperCase()) ?? null : null;
+      // Real payload lacks career-length data — estimate years pro from age
+      // (players enter at ~19-22). Without this every imported veteran counts
+      // as a rookie and is wrongly eligible for Rookie of the Year.
+      const yearsPro = p.yearsPro ?? Math.max(0, Math.min(15, (p.age || 25) - 20));
       tx.insert(playersT)
         .values({
           id: `${saveId}:${p.externalId}`,
@@ -207,10 +211,10 @@ export async function importData(saveId: string, payload: ImportPayload): Promis
           age: p.age || 25,
           heightCm: p.heightCm ?? 200,
           weightKg: p.weightKg ?? 100,
-          draftYear: p.draftYear,
+          draftYear: p.draftYear ?? (yearsPro > 0 ? season - 1 - yearsPro : null),
           draftRound: null,
           draftPick: null,
-          yearsPro: p.yearsPro ?? 0,
+          yearsPro,
           ratings,
           seasonStats: [statLine],
           careerStats: [statLine],
@@ -227,7 +231,7 @@ export async function importData(saveId: string, payload: ImportPayload): Promis
           satisfaction: 70,
           injury: null,
           development: { trajectory: "STABLE", growthLeft: 0, lastDelta: 0 },
-          tenure: 1,
+          tenure: yearsPro > 0 ? Math.max(1, Math.min(6, yearsPro)) : 0,
           stamina: 1,
           lastGameDate: null,
           baselineStats: perGame ? (perGame as unknown as Record<string, unknown>) : null,

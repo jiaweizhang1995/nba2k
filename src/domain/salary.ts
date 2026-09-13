@@ -16,6 +16,7 @@ export interface CbaParams {
   minTeamSalary: number; // 90% of cap
   maxRosterSize: number;
   minRosterSize: number;
+  offseasonRosterMax: number;
   maxContractYears: number;
   maxSalaryPct: { under9: number; nineTo18: number; over18: number }; // years of service -> 30/35/40% of cap
   rookieScale: { pick1Round1: number; pick15Round1: number; pick30Round1: number; round2Min: number };
@@ -37,6 +38,9 @@ export const CBA: CbaParams = {
   minTeamSalary: 126,
   maxRosterSize: 18, // v1.1: 15 standard + 3 two-way slots (matches real roster structure)
   minRosterSize: 13,
+  // Offseason (draft + free agency) may carry up to 20 — real NBA allows 21.
+  // The 18-man limit is enforced again when the regular season starts.
+  offseasonRosterMax: 20,
   maxContractYears: 5,
   maxSalaryPct: { under9: 0.3, nineTo18: 0.35, over18: 0.4 },
   rookieScale: { pick1Round1: 12.5, pick15Round1: 4.6, pick30Round1: 2.6, round2Min: 1.2 },

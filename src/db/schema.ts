@@ -58,6 +58,9 @@ export const players = sqliteTable(
     saveId: text("save_id").notNull(),
     name: text("name").notNull(),
     teamId: text("team_id"),
+    // Team he last finished a contract with — enables Bird-rights re-signing
+    // once he reaches free agency. Cleared on waiver (waived players have no bird).
+    lastTeamId: text("last_team_id"),
     position: text("position").notNull(),
     secondPosition: text("second_position"),
     age: integer("age").notNull(),

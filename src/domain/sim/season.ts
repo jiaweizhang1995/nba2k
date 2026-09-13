@@ -22,6 +22,7 @@ export interface LeaguePlayer {
   id: string;
   name: string;
   teamId: string | null;
+  lastTeamId: string | null; // team that last held his contract — bird rights
   position: string;
   secondPosition?: string | null;
   age: number;

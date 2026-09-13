@@ -24,6 +24,7 @@ import {
   teams as teamsT,
 } from "@/db/schema";
 import { capSnapshot } from "@/domain/salary";
+import { askingSalaryFor } from "@/domain/freeagency";
 import { providerChat, STAGE_ALLOWED_ACTIONS, type GmAction } from "@/lib/eval-provider";
 import { decryptKey, encryptKey, maskKey } from "@/lib/eval-crypto";
 import {
@@ -54,7 +55,7 @@ const now = () => new Date().toISOString();
 const shortId = (full: string) => full.split(":").slice(1).join(":");
 const MAX_TURNS = 600;
 
-export const SCORE_VERSION = "GM-BENCH v1";
+export const SCORE_VERSION = "GM-BENCH v2";
 
 export class EvalError extends Error {
   code: string;
@@ -211,19 +212,28 @@ interface ToolResult {
   stageChanged?: "DRAFT" | "FREE_AGENCY" | "SEASON" | "DONE";
 }
 
-function teamRoster(evalRow: { saveId: string; teamFullId: string }) {
+function teamRoster(evalRow: { saveId: string; teamFullId: string; season?: number }) {
   const db = getDb();
+  const season = evalRow.season ?? getSave(evalRow.saveId)?.season ?? 0;
   const rows = db.select().from(playersT).where(and(eq(playersT.saveId, evalRow.saveId), eq(playersT.teamId, evalRow.teamFullId))).all();
-  return rows.map((p) => ({
-    id: shortId(p.id),
-    name: p.name,
-    position: p.position,
-    age: p.age,
-    overall: p.ratings.overall,
-    role: p.role,
-    salary: p.contract.years[0]?.salary ?? 0,
-    yearsLeft: p.contract.years.length,
-  }));
+  return rows.map((p) => {
+    const endSeason = p.contract.years[p.contract.years.length - 1]?.season ?? season;
+    return {
+      id: shortId(p.id),
+      name: p.name,
+      position: p.position,
+      age: p.age,
+      overall: p.ratings.overall,
+      potential: p.ratings.potential,
+      yearsPro: p.yearsPro,
+      role: p.role,
+      salary: p.contract.years[0]?.salary ?? 0,
+      endSeason,
+      expiring: endSeason <= season,
+      injured: !!(p.injury && p.injury.weeksRemaining > 0),
+      noTrade: p.contract.noTrade,
+    };
+  });
 }
 
 function capSummaryOf(saveId: string, teamFullId: string) {
@@ -274,26 +284,36 @@ function toolGetMarket(evalRow: { saveId: string; teamFullId: string; seed: numb
     .from(playersT)
     .where(and(eq(playersT.saveId, evalRow.saveId), eq(playersT.status, "FREE_AGENT")))
     .all()
-    .map((p) => ({ id: shortId(p.id), name: p.name, position: p.position, age: p.age, overall: p.ratings.overall, asking: Math.max(1.2, (p.contract.years[0]?.salary ?? 5) * 1.05) }))
+    .map((p) => ({
+      id: shortId(p.id),
+      name: p.name,
+      position: p.position,
+      age: p.age,
+      overall: p.ratings.overall,
+      potential: p.ratings.potential,
+      asking: askingSalaryFor(p.contract, p.yearsPro, p.ratings.overall, p.age),
+      askingYears: Math.max(1, Math.min(4, p.age >= 32 ? 2 : 4)),
+      // Own expired player: we hold Bird rights and can re-sign over the cap.
+      fromMyTeam: p.lastTeamId === evalRow.teamFullId,
+      lastTeamAbbr: p.lastTeamId ? shortId(p.lastTeamId) : null,
+    }))
     .sort((a, b) => b.overall - a.overall)
-    .slice(0, 12);
+    .slice(0, 16);
   const teams = db.select().from(teamsT).where(eq(teamsT.saveId, evalRow.saveId)).all();
   const sample = teams
     .filter((t) => t.id !== evalRow.teamFullId)
-    .slice(0, 6)
     .map((t) => {
       const roster = db
         .select()
         .from(playersT)
         .where(and(eq(playersT.saveId, evalRow.saveId), eq(playersT.teamId, t.id)))
         .all()
-        .sort((a, b) => b.ratings.overall - a.ratings.overall)
-        .slice(0, 4)
-        .map((p) => ({ id: shortId(p.id), name: p.name, overall: p.ratings.overall, salary: p.contract.years[0]?.salary ?? 0 }));
+        .sort((a, b) => b.ratings.overall - a.ratings.overall);
       const cap = capSummaryOf(evalRow.saveId, t.id);
-      return { teamId: shortId(t.id), team: `${t.city} ${t.name}`, abbr: t.abbr, capSpace: cap.capSpace, rosterSample: roster };
+      const top = roster.slice(0, 2).map((p) => ({ id: shortId(p.id), name: p.name, overall: p.ratings.overall, salary: p.contract.years[0]?.salary ?? 0 }));
+      return { teamId: shortId(t.id), abbr: t.abbr, phase: t.aiPhase, capSpace: cap.capSpace, rosterSize: roster.length, top };
     });
-  return { summary: `查看市场：自由球员 ${fas.length} 人（展示前 12），球队样本 ${sample.length}`, data: { freeAgents: fas, teams: sample }, isAction: false };
+  return { summary: `查看市场：自由球员 ${fas.length} 人（展示前 16），全联盟 ${sample.length} 队`, data: { freeAgents: fas, teams: sample }, isAction: false };
 }
 
 function toolProposeTrade(
@@ -504,6 +524,17 @@ function buildObservation(evalRow: { saveId: string; teamFullId: string; teamSho
   const st = standingsRank(state, evalRow.teamShortId);
   const cap = capSummaryOf(evalRow.saveId, evalRow.teamFullId);
   const chemistry = getChemistry(evalRow.saveId, evalRow.teamShortId);
+  const db = getDb();
+  const recentEvents = db
+    .select()
+    .from(eventsT)
+    .where(eq(eventsT.saveId, evalRow.saveId))
+    .orderBy(desc(eventsT.at))
+    .limit(8)
+    .all()
+    .map((e) => `${e.category}: ${e.message}`)
+    .reverse();
+  const fullRoster = teamRoster({ saveId: evalRow.saveId, teamFullId: evalRow.teamFullId, season: state.season }).sort((a, b) => b.overall - a.overall);
   const base = {
     stage,
     allowedActions: STAGE_ALLOWED_ACTIONS[stage] ?? [],
@@ -516,9 +547,11 @@ function buildObservation(evalRow: { saveId: string; teamFullId: string; teamSho
     strategy: evalRow.strategy ?? "（未设置）",
     cap: { total: cap.totalSalary, space: cap.capSpace, overTax: cap.overTax },
     chemistry: chemistry.overall,
-    rosterTop: teamRoster({ saveId: evalRow.saveId, teamFullId: evalRow.teamFullId })
-      .sort((a, b) => b.overall - a.overall)
-      .slice(0, 8),
+    roster: fullRoster,
+    // Players whose contract ends this offseason — they enter the market and
+    // we hold Bird rights (re-signable over the cap). Plan before FA opens.
+    expiringThisOffseason: fullRoster.filter((p) => p.expiring).map((p) => ({ id: p.id, name: p.name, overall: p.overall, salary: p.salary })),
+    recentEvents,
   };
   if (stage === "DRAFT") {
     const board = getDraftBoard(evalRow.saveId)
@@ -560,7 +593,13 @@ const SYSTEM_PROMPT = `你是篮球经理模拟游戏《HARDWOOD GM》中的球�
 1. 只输出一个 JSON 对象，格式：{"action":"...","params":{...},"decision":"一句话公开决策摘要","goals":"目标","expected":"预期收益","risks":"风险"}
 2. 交易与签约由服务器规则裁决（薪资配平/人数/对方意愿），你只能提议。
 3. 不得试图修改数据库、绕过规则或使用上帝模式。
-4. 每个决策提交简短的公开摘要/目标/预期/风险；不要输出任何隐藏推理过程。`;
+4. 每个决策提交简短的公开摘要/目标/预期/风险；不要输出任何隐藏推理过程。
+关键规则：
+- 自家合同到期的球员会进入自由市场（freeAgents[].fromMyTeam=true）。你持有鸟权：可超工资帽续约他们（上限为顶薪）；不续约则可能被其他球队签走。roster[].expiring 标记今夏到期者。
+- 休赛期阵容可到 20 人，但常规赛开打前必须裁到 18 人以内，否则 start_new_season 会被拒绝。
+- 工资帽规则：超帽只能用中产特例（≤12.8M/年）或底薪（≤1.2M/年）；超第二土豪线只能用底薪。
+- 裁员后剩余合同变为死钱仍占工资帽——裁大合同要三思。
+- 交易在 SEASON/DRAFT/FREE_AGENCY 阶段均可提议；get_market 可查看全联盟各队的 phase（CONTENDER/PLAYOFF/BUBBLE/REBUILD）、薪资空间与核心球员，用于挑选交易对象。`;
 
 interface StepOutcome {
   status: string;
@@ -679,8 +718,33 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
     decision = srcTurn.decision ?? undefined;
   } else {
     const observation = buildObservation(evalCtx, stage);
+    const myPlayers = db
+      .select()
+      .from(playersT)
+      .where(and(eq(playersT.saveId, evalRow.saveId), eq(playersT.teamId, evalRow.teamFullId)))
+      .all()
+      .sort((a, b) => a.ratings.overall - b.ratings.overall);
+    const ownFa = db
+      .select()
+      .from(playersT)
+      .where(and(eq(playersT.saveId, evalRow.saveId), eq(playersT.status, "FREE_AGENT"), eq(playersT.lastTeamId, evalRow.teamFullId)))
+      .all()
+      .sort((a, b) => b.ratings.overall - a.ratings.overall)[0];
+    const ownFaSigned = ownFa
+      ? db
+          .select()
+          .from(evalTurnsT)
+          .where(and(eq(evalTurnsT.evaluationId, evalRow.id), eq(evalTurnsT.action, "sign_free_agent")))
+          .all()
+          .some((t) => t.ok === true && (t.params as { playerId?: string } | null)?.playerId === shortId(ownFa.id))
+      : false;
     const stubScene = {
       stage,
+      rosterCount: myPlayers.length,
+      waiveCandidateId: myPlayers[0] ? shortId(myPlayers[0].id) : null,
+      ownFaId: ownFa && ownFa.ratings.overall >= 70 ? shortId(ownFa.id) : null,
+      ownFaSalary: ownFa ? askingSalaryFor(ownFa.contract, ownFa.yearsPro, ownFa.ratings.overall, ownFa.age) : 0,
+      ownFaSigned,
       hasSignedThisStage: stage === "FREE_AGENCY" && db.select().from(faOffersT).where(and(eq(faOffersT.saveId, evalRow.saveId))).all().some((o) => o.teamId === evalRow.teamFullId),
       lastTurnWasSignAttempt:
         evalRow.turnIndex > 0 &&
@@ -907,7 +971,7 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
 }
 
 // ---------------------------------------------------------------------------
-// 完成 + 评分（GM-BENCH v1）
+// 完成 + 评分（GM-BENCH，当前版本见 SCORE_VERSION）
 // ---------------------------------------------------------------------------
 
 export function finishEvaluation(id: string): StepOutcome {
@@ -927,7 +991,26 @@ export function finishEvaluation(id: string): StepOutcome {
   const seasonsRecorded = Math.max(1, seasons.length);
   const winsPerSeason = totalWins / seasonsRecorded;
 
-  // GM-BENCH v1：版本化公式（改动必须升版本）
+  // Roster value delta: top-12 overall sum now vs the base save's snapshot —
+  // rewards GMs who actually improve the talent pool, not just ride it.
+  const topSum = (sid: string, fullId: string) =>
+    db
+      .select()
+      .from(playersT)
+      .where(and(eq(playersT.saveId, sid), eq(playersT.teamId, fullId)))
+      .all()
+      .filter((p) => p.status === "ACTIVE" || p.status === "INJURED")
+      .sort((a, b) => b.ratings.overall - a.ratings.overall)
+      .slice(0, 12)
+      .reduce((a, p) => a + p.ratings.overall, 0);
+  const baseSave = getSave(evalRow.baseSaveId);
+  const baseTeamFullId = baseSave ? `${evalRow.baseSaveId}:${evalRow.teamShortId}` : null;
+  const rosterValueStart = baseTeamFullId ? topSum(evalRow.baseSaveId, baseTeamFullId) : null;
+  const rosterValueEnd = topSum(evalRow.saveId, evalRow.teamFullId);
+  const rosterValueDelta = rosterValueStart != null ? Math.round((rosterValueEnd - rosterValueStart) * 10) / 10 : null;
+  const rosterBonus = rosterValueDelta != null ? Math.max(-20, Math.min(20, rosterValueDelta * 0.4)) : 0;
+
+  // GM-BENCH v2：版本化公式（改动必须升版本）。新增阵容净值变化项。
   const score = Math.round(
     winsPerSeason * 1.2 +
       playoffCount * 6 +
@@ -935,7 +1018,8 @@ export function finishEvaluation(id: string): StepOutcome {
       champCount * 25 +
       legalRate * 20 -
       errorRate * 15 +
-      (chemistry - 60) * 0.15,
+      (chemistry - 60) * 0.15 +
+      rosterBonus,
   );
 
   const scoreJson = {
@@ -960,14 +1044,18 @@ export function finishEvaluation(id: string): StepOutcome {
     finalChemistry: chemistry,
     tradeCount: tradeEvents.length,
     trades: tradeEvents.map((t) => t.message).slice(0, 30),
-    formula: "score = winsPerSeason*1.2 + playoffs*6 + finals*8 + champs*25 + legalRate*20 - errorRate*15 + (chem-60)*0.15",
+    rosterValueStart,
+    rosterValueEnd,
+    rosterValueDelta,
+    rosterBonus: Math.round(rosterBonus * 10) / 10,
+    formula: "score = winsPerSeason*1.2 + playoffs*6 + finals*8 + champs*25 + legalRate*20 - errorRate*15 + (chem-60)*0.15 + clamp(rosterValueDelta*0.4, -20, 20)",
   };
 
   db.update(evaluationsT)
     .set({ status: "DONE", stage: "DONE", score: scoreJson as never, finishedAt: now(), updatedAt: now() })
     .where(eq(evaluationsT.id, id))
     .run();
-  return { status: "DONE", stage: "DONE", seasonsDone: evalRow.seasonsDone, done: true, lastTurn: { action: "finish", summary: `评测完成，GM-BENCH v1 得分 ${score}`, ok: true } };
+  return { status: "DONE", stage: "DONE", seasonsDone: evalRow.seasonsDone, done: true, lastTurn: { action: "finish", summary: `评测完成，${SCORE_VERSION} 得分 ${score}`, ok: true } };
 }
 
 // ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ import {
   getSave,
   makeDraftPick,
   startNewSeason,
+  submitFaOffer,
   waivePlayer,
 } from "@/server/engine";
 import { generateDraftClass } from "@/domain/draft";
@@ -87,12 +88,36 @@ describe("free agency fairness + roster fill", () => {
 
   it("waive frees a roster spot but leaves honest dead money on the cap", () => {
     const db = getDb();
+    // Since the fix, the user's own expiring players reach free agency — the
+    // roster may sit at the 13-man floor. Sign a cheap body first so the
+    // waive doesn't breach the minimum.
+    const tried = new Set<string>();
+    for (;;) {
+      const cur = db
+        .select()
+        .from(playersT)
+        .where(and(eq(playersT.saveId, saveId), eq(playersT.teamId, `${saveId}:${userShort}`)))
+        .all();
+      if (cur.length > CBA.minRosterSize) break;
+      const fa = db
+        .select()
+        .from(playersT)
+        .where(and(eq(playersT.saveId, saveId), eq(playersT.status, "FREE_AGENT")))
+        .all()
+        .filter((p) => p.teamId === null && !tried.has(p.id))
+        .sort((a, b) => a.ratings.overall - b.ratings.overall)[0];
+      if (!fa) break;
+      tried.add(fa.id);
+      // Young FAs demand 4-year deals; the accept rule needs ≥60% of ask.
+      submitFaOffer(saveId, fa.id.split(":").slice(1).join(":"), 3, CBA.minimumSalary);
+    }
     const roster = db
       .select()
       .from(playersT)
       .where(and(eq(playersT.saveId, saveId), eq(playersT.teamId, `${saveId}:${userShort}`)))
       .all()
       .sort((a, b) => (b.contract.years[0]?.salary ?? 0) - (a.contract.years[0]?.salary ?? 0));
+    expect(roster.length).toBeGreaterThan(CBA.minRosterSize);
     const victim = roster[0];
     const salary = victim.contract.years[0]?.salary ?? 0;
     const before = capSnapshot(roster, roster.length);

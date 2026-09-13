@@ -310,7 +310,14 @@ export function aiEvaluateTrade(
       return base;
     }
     const pk = findPickGlobally(a.id);
-    return pk ? pickValue(pk, season) : { name: "?", value: 0, breakdown: [] as string[] };
+    if (!pk) return { name: "?", value: 0, breakdown: [] as string[] };
+    const base = pickValue(pk, season);
+    // Rebuilders covet future assets: a first is worth ~50% more to a team
+    // stocking up for tomorrow than to a team trying to win today.
+    if (team.aiPhase === "REBUILD") {
+      return { ...base, value: round2(base.value * 1.5), breakdown: [...base.breakdown, "重建期选秀权溢价 ×1.5"] };
+    }
+    return base;
   });
   const outgoing = party.gives.map((a) => {
     if (a.kind === "PLAYER") {

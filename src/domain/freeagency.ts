@@ -24,6 +24,24 @@ export interface OfferInput {
   avgSalary: number;
 }
 
+/**
+ * A free agent's per-year asking price: ~5% raise on his previous salary,
+ * capped by the CBA max-contract tier for his years of service. Without the
+ * cap, 10-year vets on 50M+ deals would ask above the legal max.
+ */
+export function askingSalaryFor(contract: Contract, yearsPro: number, overall = 70, age = 27): number {
+  const prev = contract.years[0]?.salary ?? 5;
+  const maxFirst = maxContractValue(yearsPro, 1).firstYear;
+  // Market value is set by talent, not by what the last contract happened to
+  // pay — an 85-overall player coming off a rookie deal does not ask 5.5M.
+  const ratingPct = overall >= 90 ? 1 : overall >= 87 ? 0.85 : overall >= 84 ? 0.65 : overall >= 81 ? 0.45 : overall >= 78 ? 0.28 : overall >= 75 ? 0.16 : overall >= 72 ? 0.08 : 0;
+  const ratingAsk = round2(ratingPct * maxFirst);
+  // Prior salary anchors the ask, but the anchor weakens with age — a 34yo
+  // ex-max player knows the market has corrected.
+  const anchor = round2(prev * (age >= 33 ? 0.5 : age >= 30 ? 0.7 : 0.9));
+  return round2(Math.max(CBA.minimumSalary, Math.min(Math.max(ratingAsk, anchor), maxFirst)));
+}
+
 export interface FaEvaluation {
   interest: number; // 0-100
   accept: boolean;
@@ -33,7 +51,7 @@ export interface FaEvaluation {
 /** Does the team have room or an exception to pay this? */
 export function canAfford(team: TradeTeam, avgSalary: number, rosterAfter: number, deadMoney = 0): { ok: boolean; reason: string } {
   const snap = capSnapshot(team.players.map((p) => ({ contract: p.contract })), rosterAfter, deadMoney);
-  if (rosterAfter > CBA.maxRosterSize) return { ok: false, reason: `签约后人数超过上限 ${CBA.maxRosterSize}` };
+  if (rosterAfter > CBA.offseasonRosterMax) return { ok: false, reason: `签约后人数超过休赛期上限 ${CBA.offseasonRosterMax}` };
   if (!snap.overCap) {
     if (avgSalary <= snap.capSpace) return { ok: true, reason: "使用薪资空间" };
     return { ok: false, reason: `薪资空间不足（剩余 ${snap.capSpace.toFixed(1)}M，报价 ${avgSalary.toFixed(1)}M）` };

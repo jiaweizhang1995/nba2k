@@ -213,8 +213,10 @@ export function generateDraftClass(seed: number, season: number, count = 60): Pr
   const used = new Set<string>();
   const prospects: ProspectSeed[] = [];
 
-  // Pre-roll class quality so a season can be strong or weak overall.
-  const classStrength = rng.float(0.85, 1.15);
+  // Pre-roll class quality so a season can be strong or weak overall. Floor
+  // is raised so even a "weak" class still has draftable talent — a real
+  // class never has zero players worth a first-round pick.
+  const classStrength = rng.float(0.92, 1.12);
 
   for (let i = 0; i < count; i++) {
     let name = `${PROSPECT_FIRST[rng.int(0, PROSPECT_FIRST.length - 1)]} ${PROSPECT_LAST[rng.int(0, PROSPECT_LAST.length - 1)]}`;
@@ -224,7 +226,7 @@ export function generateDraftClass(seed: number, season: number, count = 60): Pr
     const position = CLASS_POSITIONS[i % CLASS_POSITIONS.length];
     const tier = rng.next();
     const overall = Math.round(
-      (tier < 0.08 ? rng.int(70, 75) : tier < 0.3 ? rng.int(63, 69) : tier < 0.65 ? rng.int(56, 62) : rng.int(48, 55)) * classStrength,
+      (tier < 0.08 ? rng.int(70, 76) : tier < 0.3 ? rng.int(64, 69) : tier < 0.65 ? rng.int(57, 63) : rng.int(50, 56)) * classStrength,
     );
     const age = tier < 0.4 ? rng.int(19, 20) : rng.int(19, 22);
     const potential = Math.min(98, overall + rng.int(4, age <= 20 ? 20 : 12));
