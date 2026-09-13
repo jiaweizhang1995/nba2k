@@ -2229,6 +2229,14 @@ export function submitFaOffer(saveId: string, playerId: string, years: number, a
   if (!userTeamId) throw new EngineError("NO_USER_TEAM", "存档未选择球队");
   const userShort = userTeamId.includes(":") ? userTeamId.split(":").pop()! : userTeamId;
 
+  // Reacquisition bar: a player you waived this season can't come back until
+  // next league year — otherwise waive-and-resign launders salary into dead
+  // money plus a minimum deal.
+  const waivedThisSeason = new Set<string>((ps[`waived:${save.season}`] as string[] | undefined) ?? []);
+  if (waivedThisSeason.has(playerId)) {
+    return { accepted: false as const, reason: "本赛季被你裁掉的球员不可回签（CBA 回签禁令）", interest: 0 };
+  }
+
   const team = toTradeTeam(saveId, userShort);
 
   // In-season signings are rest-of-season minimum deals — that's all the CBA
@@ -2427,7 +2435,12 @@ export function waivePlayer(saveId: string, playerId: string) {
     tx.update(playersT).set({ teamId: null, lastTeamId: null, status: "FREE_AGENT", role: "BENCH" }).where(eq(playersT.id, player.id)).run();
     const cur = deadCapTable(saveId);
     cur[userShort] = [...(cur[userShort] ?? []), ...deadEntries];
-    tx.update(saves).set({ phaseState: { ...ps, deadCap: cur } as never, updatedAt: now() }).where(eq(saves.id, saveId)).run();
+    // Reacquisition bar: you can't re-sign a player you waived this season —
+    // otherwise waive-and-resign at the minimum is free cap laundering.
+    const waivedKey = `waived:${save.season}`;
+    const waived = new Set<string>((getPhaseState(saveId)[waivedKey] as string[] | undefined) ?? []);
+    waived.add(playerId);
+    tx.update(saves).set({ phaseState: { ...ps, deadCap: cur, [waivedKey]: [...waived] } as never, updatedAt: now() }).where(eq(saves.id, saveId)).run();
   });
   logEvent(saveId, "ROSTER", `裁掉 ${player.name}：剩余 ${deadEntries.length} 年合同共 ${total.toFixed(1)}M 计入死钱`, { playerId, deadEntries, total });
   return { waived: player.name, deadMoney: deadEntries, total };

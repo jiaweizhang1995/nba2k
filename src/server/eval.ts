@@ -23,7 +23,7 @@ import {
   saves as savesT,
   teams as teamsT,
 } from "@/db/schema";
-import { capSnapshot } from "@/domain/salary";
+import { capSnapshot, seasonMoney } from "@/domain/salary";
 import { askingSalaryFor } from "@/domain/freeagency";
 import { providerChat, STAGE_ALLOWED_ACTIONS, type GmAction } from "@/lib/eval-provider";
 import { decryptKey, encryptKey, maskKey } from "@/lib/eval-crypto";
@@ -320,7 +320,7 @@ function toolGetMarket(evalRow: { saveId: string; teamFullId: string; seed: numb
         .all()
         .sort((a, b) => b.ratings.overall - a.ratings.overall);
       const cap = capSummaryOf(evalRow.saveId, t.id);
-      const top = roster.slice(0, 2).map((p) => ({ id: shortId(p.id), name: p.name, overall: p.ratings.overall, salary: p.contract.years[0]?.salary ?? 0 }));
+      const top = roster.slice(0, 4).map((p) => ({ id: shortId(p.id), name: p.name, pos: p.position, overall: p.ratings.overall, salary: p.contract.years[0]?.salary ?? 0, morale: p.satisfaction <= 40 ? "UNHAPPY" : "OK" }));
       return { teamId: shortId(t.id), abbr: t.abbr, phase: t.aiPhase, capSpace: cap.capSpace, rosterSize: roster.length, top };
     });
   return { summary: `查看市场：自由球员 ${fas.length} 人（展示前 16），全联盟 ${sample.length} 队`, data: { freeAgents: fas, teams: sample }, isAction: false };
@@ -437,7 +437,9 @@ function toolSignFreeAgent(
     const pickFas = fas[fas.length - 1];
     playerId = shortId(pickFas.id);
     years = 2;
-    salary = Math.max(1.3, Math.round(((pickFas.contract.years[0]?.salary ?? 5) * 1.05) * 10) / 10);
+    // Offer ~95% of his real market ask, never below the season's minimum.
+    const ask = askingSalaryFor(pickFas.contract, pickFas.yearsPro, pickFas.ratings.overall, pickFas.age, evalRow.season);
+    salary = Math.max(seasonMoney(evalRow.season).minimumSalary, Math.round(ask * 0.95 * 10) / 10);
   }
   const r = submitFaOffer(evalRow.saveId, playerId, years, salary);
   if (r.accepted) {
