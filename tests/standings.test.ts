@@ -95,13 +95,12 @@ describe("Regular season progression", () => {
     // fictional prospects). Insert with draftYear = current season.
     const { getDb } = await import("@/db");
     const { players: playersT, saves: savesT } = await import("@/db/schema");
-    const { eq } = await import("drizzle-orm");
+    const { and, eq } = await import("drizzle-orm");
     const db = getDb();
     const save = getSave(saveId)!;
     // The previous test exercised this season's picks (empty class), so roll
     // the save one more year forward and draft against the next pick class.
     const season = save.season + 1;
-    const teams = loadLeagueState(saveId).teams;
     const mkRatings = (overall: number) => ({
       overall,
       inside: overall,
@@ -161,11 +160,21 @@ describe("Regular season progression", () => {
         })
         .run();
     }
-    // Put the save into DRAFT with a full 60-slot order.
-    const order = [
-      ...teams.map((t, i) => ({ pickNumber: i + 1, round: 1, holderTeamId: t.id })),
-      ...teams.map((t, i) => ({ pickNumber: i + 1, round: 2, holderTeamId: t.id })),
-    ];
+    // Put the save into DRAFT with a full 60-slot order honoring REAL pick
+    // ownership — AI trades may have moved picks, so each slot goes to the
+    // current holder, not the original team.
+    const { draftPicks: picksT } = await import("@/db/schema");
+    const pickRows = db
+      .select()
+      .from(picksT)
+      .where(and(eq(picksT.saveId, saveId), eq(picksT.year, season)))
+      .all();
+    const byRound = (r: number) =>
+      pickRows
+        .filter((p) => p.round === r)
+        .sort((a, b) => a.originalTeamId.localeCompare(b.originalTeamId))
+        .map((p, i) => ({ pickNumber: i + 1, round: r, holderTeamId: p.holderTeamId.split(":").pop()! }));
+    const order = [...byRound(1), ...byRound(2)];
     db.update(savesT)
       .set({ season, phase: "DRAFT", phaseState: { draft: { order, lottery: [], worst14: [] } } as never, updatedAt: new Date().toISOString() })
       .where(eq(savesT.id, saveId))

@@ -218,14 +218,19 @@ export async function importData(saveId: string, payload: ImportPayload): Promis
           ratings,
           seasonStats: [statLine],
           careerStats: [statLine],
-          contract: p.contract ?? {
-            type: "VETERAN",
-            years: [{ season, salary: 0 }],
-            birdRights: false,
-            noTrade: false,
-            option: null,
-            signedSeason: season,
-          },
+          contract: p.contract && (p.contract.years?.[0]?.salary ?? 0) > 0
+            ? p.contract
+            : {
+                // No reliable source contract → market-value placeholder:
+                // nobody in the NBA actually plays for $0, and a zero-salary
+                // roster poisons every trade/cap check downstream.
+                type: "VETERAN" as const,
+                years: [{ season, salary: Math.max(1.2, Math.round(Math.max(0, ratings.overall - 55) * 0.6 * 10) / 10) }],
+                birdRights: false,
+                noTrade: false,
+                option: null,
+                signedSeason: season,
+              },
           status: "ACTIVE",
           role: "ROTATION",
           satisfaction: 70,
@@ -259,14 +264,21 @@ export async function importData(saveId: string, payload: ImportPayload): Promis
       byTeam.set(row.teamId, list);
     }
     for (const [, roster] of byTeam) {
-      const totalPpg = roster.reduce((a, r) => a + ((r.baselineStats as { ppg?: number } | null)?.ppg ?? 0), 0);
       const sorted = [...roster].sort((a, b) => b.ratings.overall - a.ratings.overall);
-      sorted.forEach((row, i) => {
+      // Real payload rosters run 19-21 deep (two-ways, camp bodies). The CBA
+      // max is 18 — the tail end of the roster gets waived to free agency.
+      const surplus = sorted.slice(18);
+      for (const row of surplus) {
+        tx.update(playersT).set({ teamId: null, status: "FREE_AGENT", role: "BENCH" }).where(eq(playersT.id, row.id)).run();
+      }
+      const kept = sorted.slice(0, 18);
+      kept.forEach((row, i) => {
         const role = i === 0 && row.ratings.overall >= 86 ? "STAR" : i === 1 && row.ratings.overall >= 84 ? "STAR" : i < 5 ? "STARTER" : i === 5 && row.ratings.overall >= 79 ? "SIXTH_MAN" : i < 10 ? "ROTATION" : "BENCH";
         tx.update(playersT).set({ role }).where(eq(playersT.id, row.id)).run();
       });
+      const totalPpg = kept.reduce((a, r) => a + ((r.baselineStats as { ppg?: number } | null)?.ppg ?? 0), 0);
       if (totalPpg <= 0) continue;
-      for (const row of roster) {
+      for (const row of kept) {
         const base = row.baselineStats as { ppg?: number } | null;
         if (!base?.ppg) continue;
         const share = base.ppg / totalPpg;

@@ -2,7 +2,7 @@
 // Salary & asset conservation.
 import { beforeAll, describe, expect, it } from "vitest";
 import { createSave, executeTrade, validateTradeOnServer, getTeamAssets, loadLeagueState, requestTradeOffers } from "@/server/engine";
-import { salaryMatching } from "@/domain/salary";
+import { capSnapshot, salaryMatching } from "@/domain/salary";
 import type { TradeParty } from "@/domain/types";
 
 let saveId: string;
@@ -25,13 +25,19 @@ function rosterOf(teamId: string) {
 function findSalaryMatchPair() {
   const user = rosterOf(userTeam);
   const partner = rosterOf(partnerTeam);
+  // Check both directions against each team's real cap position — a
+  // second-apron team can't take back more than it sends, so a ±3M window
+  // alone isn't enough anymore.
+  const snapOf = (teamId: string, roster: typeof user) =>
+    capSnapshot(roster.map((p) => ({ contract: p.contract })), roster.length, 0);
+  const uSnap = snapOf(userTeam, user);
+  const pSnap = snapOf(partnerTeam, partner);
   for (const u of user) {
     for (const p of partner) {
       const us = u.contract.years[0]?.salary ?? 0;
       const ps = p.contract.years[0]?.salary ?? 0;
       if (us <= 0 || ps <= 0) continue;
-      // mutual salary match within a small window (works for any cap position)
-      if (Math.abs(us - ps) <= 3 && ps <= us * 1.5 + 0.1 && us <= ps * 1.5 + 0.1) {
+      if (Math.abs(us - ps) <= 3 && salaryMatching(us, ps, uSnap).ok && salaryMatching(ps, us, pSnap).ok) {
         return { u, p };
       }
     }

@@ -36,8 +36,10 @@ import {
   getDraftBoard,
   getDraftOrder,
   getSave,
+  listInboundOffers,
   loadLeagueState,
   makeDraftPick,
+  respondInboundOffer,
   startFreeAgency,
   startNewSeason,
   submitFaOffer,
@@ -96,7 +98,7 @@ function cloneSaveForEval(baseSaveId: string, seed: number, teamShortId: string,
       tx.insert(teamsT).values({ ...t, id: `${newId}:${shortId(t.id)}`, saveId: newId }).run();
     }
     for (const p of db.select().from(playersT).where(eq(playersT.saveId, baseSaveId)).all()) {
-      tx.insert(playersT).values({ ...p, id: `${newId}:${shortId(p.id)}`, saveId: newId, teamId: p.teamId ? `${newId}:${shortId(p.teamId)}` : null }).run();
+      tx.insert(playersT).values({ ...p, id: `${newId}:${shortId(p.id)}`, saveId: newId, teamId: p.teamId ? `${newId}:${shortId(p.teamId)}` : null, lastTeamId: p.lastTeamId ? `${newId}:${shortId(p.lastTeamId)}` : null }).run();
     }
     for (const k of db.select().from(picksT).where(eq(picksT.saveId, baseSaveId)).all()) {
       tx.insert(picksT).values({ ...k, id: `${newId}:${shortId(k.id)}`, saveId: newId, originalTeamId: `${newId}:${shortId(k.originalTeamId)}`, holderTeamId: `${newId}:${shortId(k.holderTeamId)}` }).run();
@@ -551,6 +553,7 @@ function buildObservation(evalRow: { saveId: string; teamFullId: string; teamSho
     // Players whose contract ends this offseason — they enter the market and
     // we hold Bird rights (re-signable over the cap). Plan before FA opens.
     expiringThisOffseason: fullRoster.filter((p) => p.expiring).map((p) => ({ id: p.id, name: p.name, overall: p.overall, salary: p.salary })),
+    inboundOffers: listInboundOffers(evalRow.saveId).map((o) => ({ offerId: o.id, fromTeam: o.fromTeam, theyGive: o.playerName, theyWant: o.askNames })),
     recentEvents,
   };
   if (stage === "DRAFT") {
@@ -581,12 +584,13 @@ const SYSTEM_PROMPT = `你是篮球经理模拟游戏《HARDWOOD GM》中的球�
 可用动作（必须逐字使用 action 字段；观察里的 allowedActions 列出当前阶段合法动作）：
 - get_roster / get_assets / get_market：查看信息（返回的对象都带 id 字段，动作参数必须使用这些 id，禁止猜测）
 - propose_trade：params = { partnerTeamId, givePlayerIds[], givePickIds[], receivePlayerIds[], receivePickIds[] }（partnerTeamId 用球队 teamId，其余用球员/选秀权的 id）
+- respond_trade：params = { offerId, accept }（回应 inboundOffers 里 AI 球队的主动报价；accept=true 接受，false 拒绝）
 - sign_free_agent：params = { playerId, years, avgSalary }（自由市场阶段；playerId 来自 freeAgents[].id）
 - waive_player：params = { playerId }（裁掉我方球员；剩余合同变为死钱仍占工资帽）
 - draft_pick：params = { prospectId? }（选秀阶段；prospectId 来自 topProspects[].id，省略则选最优）
 - finish_draft：剩余选秀全部自动完成
 - set_strategy：params = { text }（记录你的建队策略）
-- advance_season：推进当前赛季到结束（常规赛+季后赛）
+- advance_season：推进赛程——常规赛按月推进（每回合约 30 天，可中途做交易/调整），季后赛一次性推完，阶段变化会暂停并返回最新盘面
 - start_new_season：自由市场结束后开启新赛季
 - do_nothing：观察一轮
 约束：
@@ -753,6 +757,23 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
           .from(evalTurnsT)
           .where(and(eq(evalTurnsT.evaluationId, evalRow.id), eq(evalTurnsT.turnIndex, evalRow.turnIndex)))
           .get()?.action === "sign_free_agent",
+      inboundOfferId: (() => {
+        const o = listInboundOffers(evalRow.saveId)[0];
+        return o ? o.id : null;
+      })(),
+      inboundGood: (() => {
+        const o = listInboundOffers(evalRow.saveId)[0];
+        if (!o) return false;
+        const incoming = db.select().from(playersT).where(eq(playersT.id, o.playerId)).get()?.ratings.overall ?? 0;
+        const out = o.asks
+          .filter((a) => a.kind === "PLAYER")
+          .map((a) => db.select().from(playersT).where(eq(playersT.id, a.id)).get()?.ratings.overall ?? 0);
+        const givesPick = o.asks.some((a) => a.kind === "PICK");
+        // crude stub judgment: incoming star clearly better than outgoing
+        // package average, and no first given for a non-star.
+        const avgOut = out.length ? out.reduce((a, x) => a + x, 0) / out.length : 0;
+        return incoming - avgOut >= 4 && !(givesPick && incoming < 84);
+      })(),
       tradeAttempted:
         db
           .select()
@@ -841,6 +862,15 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
         case "propose_trade":
           toolResult = toolProposeTrade({ ...evalCtx }, params);
           break;
+        case "respond_trade": {
+          const r = respondInboundOffer(evalRow.saveId, String(params.offerId ?? ""), params.accept === true);
+          toolResult = {
+            summary: r.accepted ? "接受了 AI 球队的交易报价，交易完成" : `报价处理：${(r as { reason?: string }).reason ?? "已拒绝"}`,
+            isAction: true,
+            legal: true,
+          };
+          break;
+        }
         case "sign_free_agent":
           if (stage !== "FREE_AGENCY") throw new EvalError("WRONG_STAGE", "签约仅在自由市场阶段");
           toolResult = toolSignFreeAgent({ ...evalCtx }, params);
@@ -861,11 +891,19 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
           toolResult = { summary: `策略已记录：${String(params.text ?? "").slice(0, 80)}`, isAction: false };
           break;
         case "advance_season": {
-          const r = advanceSim(evalRow.saveId, "SEASON");
+          const saveNow = getSave(evalRow.saveId)!;
+          // In-season the agent advances month by month — mid-season
+          // management (deadline trades, fatigue) is where real GM skill
+          // shows. Playoffs still complete in one call; stage changes stop
+          // the advance so the next observation is fresh.
+          const mode = saveNow.phase === "REGULAR_SEASON" ? "MONTH" : saveNow.phase === "PLAYOFFS" ? "PLAYOFFS" : "SEASON";
+          const r = advanceSim(evalRow.saveId, mode);
+          const after = getSave(evalRow.saveId)!;
+          const myRow = getDb().select().from(teamsT).where(eq(teamsT.id, evalRow.teamFullId)).get();
           const champTeam = r.champion ? getDb().select().from(teamsT).where(eq(teamsT.id, `${evalRow.saveId}:${r.champion}`)).get() : null;
           toolResult = {
-            summary: `赛季推进完成：${r.days} 天 / ${r.gamesPlayed} 场${r.phaseChanged ? `，进入 ${r.phaseChanged}` : ""}${champTeam ? `，总冠军 ${champTeam.city} ${champTeam.name}` : ""}`,
-            data: { days: r.days, games: r.gamesPlayed, champion: champTeam ? `${champTeam.city} ${champTeam.name}` : null },
+            summary: `推进至 ${after.currentDate}：${r.days} 天 / ${r.gamesPlayed} 场，我方 ${myRow ? `${myRow.wins}胜${myRow.losses}负` : "-"}${r.phaseChanged ? `，进入 ${r.phaseChanged}` : ""}${champTeam ? `，总冠军 ${champTeam.city} ${champTeam.name}` : ""}`,
+            data: { days: r.days, games: r.gamesPlayed, date: after.currentDate, record: myRow ? `${myRow.wins}-${myRow.losses}` : null, champion: champTeam ? `${champTeam.city} ${champTeam.name}` : null },
             isAction: true,
             legal: true,
           };

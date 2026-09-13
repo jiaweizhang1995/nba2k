@@ -10,7 +10,9 @@ import {
   advanceSim,
   createSave,
   getSave,
+  listInboundOffers,
   makeDraftPick,
+  respondInboundOffer,
   startNewSeason,
   submitFaOffer,
   waivePlayer,
@@ -72,6 +74,14 @@ describe("awards eligibility + user contract expiry", () => {
       expect(row!.yearsPro).toBeLessThanOrEqual(1);
     }
   }, 300_000);
+
+  it("aging is real: retirees exist, no 43+ player stays active", () => {
+    const all = getDb().select().from(playersT).where(eq(playersT.saveId, saveId)).all();
+    const old = all.filter((p) => (p.status === "ACTIVE" || p.status === "INJURED") && p.age >= 43);
+    expect(old.length).toBe(0);
+    const retired = all.filter((p) => p.status === "RETIRED");
+    expect(retired.length).toBeGreaterThan(0);
+  });
 
   it("mid-season trade deadline fires once: flag persisted, deals bounded at 4", () => {
     const save = getSave(saveId)!;
@@ -231,4 +241,25 @@ describe("draft class floor", () => {
       expect(cls).toHaveLength(60);
     }
   });
+});
+
+describe("inbound trade offers", () => {
+  it("a deadline offer persists past the market flag write and accepts cleanly", async () => {
+    // Seed 555005 deterministically produces a deadline offer — the flag
+    // write must not clobber it, and accepting must clear normal validation.
+    const s = await createSave({ name: "inbound 回归", seed: 555005 });
+    for (let i = 0; i < 8; i++) {
+      await advanceSim(s.saveId, "MONTH");
+      const sv = getSave(s.saveId)!;
+      if ((sv.phaseState as Record<string, unknown>)[`deadlineMarket:${sv.season}`]) break;
+    }
+    const offers = listInboundOffers(s.saveId);
+    expect(offers.length).toBeGreaterThanOrEqual(1);
+    const offer = offers[0];
+    expect(offer.playerName).not.toBe("?");
+    expect(offer.asks.length).toBeGreaterThan(0);
+    const res = respondInboundOffer(s.saveId, offer.id, true);
+    expect(res.accepted).toBe(true);
+    expect(listInboundOffers(s.saveId)).toHaveLength(0);
+  }, 120_000);
 });

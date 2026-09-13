@@ -561,7 +561,7 @@ export interface AdvanceResult {
 
 const shortId = (full: string) => full.split(":").slice(1).join(":");
 
-export function advanceSim(saveId: string, mode: AdvanceMode): AdvanceResult {
+export function advanceSim(saveId: string, mode: AdvanceMode, marketDiag?: Record<string, number>): AdvanceResult {
   const save = getSave(saveId);
   if (!save) throw new EngineError("NO_SAVE", "存档不存在");
   if (save.phase === "DRAFT" || save.phase === "FREE_AGENCY") {
@@ -595,6 +595,9 @@ export function advanceSim(saveId: string, mode: AdvanceMode): AdvanceResult {
     if (mode === "REGULAR_SEASON" && state.phase !== "REGULAR_SEASON") break;
     if (mode === "PLAYOFFS" && state.phase !== "PLAYOFFS") break;
     if (mode === "SEASON" && state.phase === "OFFSEASON") break;
+    // Granular modes stop at phase boundaries so callers (eval agents) get a
+    // fresh observation whenever the league context changes.
+    if ((mode === "DAY" || mode === "WEEK" || mode === "MONTH") && state.phase !== startPhase) break;
     const report = advanceDay(state);
     result.days++;
     result.gamesPlayed += report.gamesPlayed;
@@ -604,10 +607,12 @@ export function advanceSim(saveId: string, mode: AdvanceMode): AdvanceResult {
     playedGameIds.push(...report.results.map((r) => r.gameId));
     if (!deadlineDone && state.phase === "REGULAR_SEASON" && report.date >= deadlineDate) {
       persistState(state);
-      const n = runAiTradeMarket(saveId, undefined, { deadline: true });
+      const n = runAiTradeMarket(saveId, marketDiag, { deadline: true });
       if (n > 0) result.notes.push(`交易截止日：联盟完成 ${n} 笔 AI 交易`);
       db.update(saves)
-        .set({ phaseState: { ...(phaseState as Record<string, unknown>), [`deadlineMarket:${state.season}`]: true } as never, updatedAt: now() })
+        // Re-read phaseState: runAiTradeMarket may have just written
+        // inboundOffers — spreading the stale snapshot would clobber them.
+        .set({ phaseState: { ...getPhaseState(saveId), [`deadlineMarket:${state.season}`]: true } as never, updatedAt: now() })
         .where(eq(saves.id, saveId))
         .run();
       deadlineDone = true;
@@ -732,6 +737,49 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
   // market — re-signing them (with Bird rights, see submitFaOffer) is a real
   // GM decision, not something the engine should auto-resolve.
   const newSeason = state.season + 1;
+
+  // 1.5) retirements: old and washed-up players hang it up — deterministic
+  // per player/season. Remaining guaranteed money stays on the books as dead
+  // cap (retirement doesn't erase a contract in the NBA).
+  {
+    const psNow = getPhaseState(state.saveId);
+    const deadCap = { ...((psNow.deadCap as Record<string, { season: number; salary: number }[]> | undefined) ?? {}) };
+    let retired = 0;
+    const retiredNames: string[] = [];
+    for (const p of state.players) {
+      if (p.status !== "ACTIVE" && p.status !== "INJURED" && p.status !== "FREE_AGENT") continue;
+      const chance =
+        p.age >= 40 ? 0.75 :
+        p.age === 39 ? 0.55 :
+        p.age === 38 ? 0.4 :
+        p.age === 37 ? 0.25 :
+        p.age === 36 ? 0.12 :
+        p.ratings.overall < 55 ? 0.3 :
+        (p.age >= 33 && p.ratings.overall < 60) ? 0.35 : 0;
+      if (chance <= 0) continue;
+      const rng = rngFor(state.seed, `retire:${state.season}:${p.id}`);
+      if (!rng.chance(chance)) continue;
+      if (p.teamId && p.contract.years.length) {
+        const owed = p.contract.years.filter((y) => y.season >= newSeason).map((y) => ({ season: y.season, salary: y.salary }));
+        if (owed.length) deadCap[p.teamId] = [...(deadCap[p.teamId] ?? []), ...owed];
+      }
+      p.lastTeamId = p.teamId;
+      p.teamId = null;
+      p.status = "RETIRED";
+      p.contract = { ...p.contract, years: [] };
+      retired++;
+      retiredNames.push(p.name);
+    }
+    if (retired > 0) {
+      const db = getDb();
+      db.update(saves)
+        .set({ phaseState: { ...psNow, deadCap } as never, updatedAt: now() })
+        .where(eq(saves.id, state.saveId))
+        .run();
+      result.notes.push(`休赛期退役 ${retired} 人：${retiredNames.slice(0, 6).join("、")}${retired > 6 ? " 等" : ""}`);
+    }
+  }
+
   const userShort = (() => {
     const uid = getPhaseState(state.saveId).userTeamId as string | undefined;
     return uid ? stripId(uid) : null;
@@ -1459,15 +1507,23 @@ export function runAiTradeMarket(saveId: string, diag?: Record<string, number>, 
         if (!starTax) packages.push({ players: combo, picks: [] });
         if (firsts[0]) packages.push({ players: combo, picks: [firsts[0]] });
       };
+      const sellerSlack = Math.min(5, Math.max(0, CBA.maxRosterSize - seller.players.length + 1));
+      // N-for-1 also drains the BUYER below the minimum — cap package size.
+      const buyerSlack = Math.max(0, buyer.players.length - CBA.minRosterSize + 1);
+      const maxPkg = Math.min(sellerSlack, buyerSlack);
+      if (maxPkg <= 0) { bump("no_package"); continue; }
+      // Salary matching needs actual salary — cheapest-value pieces are
+      // usually $0 filler contracts. Anchor on the buyer's mid-salary movable
+      // pieces first, then pad with cheap youngs.
+      const movableBySalary = [...movable].sort((a, b) => salaryForSeason(b.contract, 0) - salaryForSeason(a.contract, 0));
       for (const floor of [vetSalary / CBA.tradeBand2 - 0.2, vetSalary / CBA.tradeBand1 - 0.2]) {
-        // Strategy A: cheapest-value accumulation — the classic "youngs + pick".
+        // Strategy A: salary anchor + cheap value pieces.
         const combo: TradePlayer[] = [];
         let sal = 0;
-        for (const p of movable) {
-          if (sal >= floor || combo.length >= 5) break;
+        for (const p of movableBySalary) {
+          if (sal >= floor || combo.length >= maxPkg) break;
           if (p.ratings.overall >= vet.ratings.overall) continue;
-          const isYoung = p.age <= 26;
-          if (!isYoung && sal + salaryForSeason(p.contract, 0) > vetSalary) continue;
+          if (salaryForSeason(p.contract, 0) > vetSalary) continue;
           combo.push(p);
           sal += salaryForSeason(p.contract, 0);
         }
@@ -1484,7 +1540,7 @@ export function runAiTradeMarket(saveId: string, diag?: Record<string, number>, 
           const comboB: TradePlayer[] = [anchor];
           let salB = salaryForSeason(anchor.contract, 0);
           for (const p of movable) {
-            if (salB >= floor || comboB.length >= 5) break;
+            if (salB >= floor || comboB.length >= maxPkg) break;
             if (p.id === anchor.id) continue;
             if (p.ratings.overall >= vet.ratings.overall) continue;
             comboB.push(p);
@@ -1524,7 +1580,179 @@ export function runAiTradeMarket(saveId: string, diag?: Record<string, number>, 
   if (trades > 0) {
     logEvent(saveId, "TRADE", deadline ? `交易截止日：AI 球队完成 ${trades} 笔交易` : `休赛期 AI 交易市场：${trades} 笔交易达成`, { trades });
   }
+
+  // Inbound offer: a seller that didn't deal rings up the USER. Real GMs get
+  // calls — evaluating an inbound offer is part of the job. Deterministic,
+  // at most one pending offer at a time.
+  if (deadline && userFullId) {
+    const rng = rngFor(save.seed, `inbound:${season}`);
+    if (!rng.chance(0.8)) bump("offer_no_call");
+    else {
+      const user = toTradeTeam(saveId, shortOf(userFullId));
+      const psNow = getPhaseState(saveId);
+      let offerMade = false;
+      for (const sRow of sellers) {
+        if (used.has(sRow.id) || offerMade) continue;
+        const seller = toTradeTeam(saveId, shortOf(sRow.id));
+        const sellerVets = seller.players
+          .filter((p) => p.age >= 26 && p.ratings.overall >= 72 && !p.contract.noTrade && contractEndSeason(p.contract) >= season && needPremium(user, p) > 0)
+          .sort((a, b) => playerValue(b, season).value - playerValue(a, season).value);
+        if (!sellerVets.length) { bump("offer_no_vet"); continue; }
+        // The ask: user's salary-matched pieces (+ a 1st if needed). Never ask
+        // for the user's top-3 players. Try each vet — the best one may be
+        // too expensive for the user's movable salary to match.
+        const userByOverall = [...user.players].sort((a, b) => b.ratings.overall - a.ratings.overall);
+        const untouchable = new Set(userByOverall.slice(0, 3).map((p) => p.id));
+        const movable = user.players
+          .filter((p) => !untouchable.has(p.id) && !p.contract.noTrade)
+          // matching salary comes first — cheap-value pieces are $0 fillers
+          .sort((a, b) => salaryForSeason(b.contract, 0) - salaryForSeason(a.contract, 0) || playerValue(a, season).value - playerValue(b, season).value);
+        const userSnap = capSnapshot(user.players.map((p) => ({ contract: p.contract })), user.players.length, user.deadMoney ?? 0);
+        const sellerSnap = capSnapshot(seller.players.map((p) => ({ contract: p.contract })), seller.players.length, seller.deadMoney ?? 0);
+        const sellerSlack = Math.max(0, CBA.maxRosterSize - seller.players.length + 1);
+        const userSlack = Math.max(0, user.players.length - CBA.minRosterSize + 1);
+        const askCap = Math.min(4, sellerSlack, userSlack);
+        // Min outgoing salary that legally matches `incoming` for the user,
+        // and max incoming salary the seller can take back for `outgoing` —
+        // both mirroring salaryMatching()'s bands. A deal needs
+        // userFloor <= askTotal <= sellerCeiling.
+        const minOutgoingFor = (incoming: number) => {
+          if (userSnap.overSecondApron) return incoming - 0.1;
+          const smallBand = (incoming - 0.1) / CBA.tradeBand1;
+          if (smallBand <= 9.8 || !userSnap.overCap) return smallBand;
+          return (incoming - 0.1) / CBA.tradeBand2;
+        };
+        const maxIncomingFor = (outgoing: number) => {
+          if (!sellerSnap.overCap) return Infinity;
+          if (sellerSnap.overSecondApron) return outgoing + 0.1;
+          return outgoing <= 9.8 ? outgoing * CBA.tradeBand1 + 0.1 : outgoing * CBA.tradeBand2 + 0.1;
+        };
+        // The richest vet whose salary the user's movable contracts can
+        // possibly match — cheaper vets get tried in descending value order.
+        const movableTotal = movable.slice(0, askCap).reduce((s, p) => s + salaryForSeason(p.contract, 0), 0);
+        const maxAffordable = userSnap.overSecondApron ? movableTotal + 0.1 : movableTotal <= 9.8 || !userSnap.overCap ? movableTotal * CBA.tradeBand1 + 0.1 : movableTotal * CBA.tradeBand2 + 0.1;
+        const affordable = sellerVets.filter((v) => {
+          const vSal = salaryForSeason(v.contract, 0);
+          return vSal <= maxAffordable && minOutgoingFor(vSal) <= maxIncomingFor(vSal);
+        });
+        if (!affordable.length) { bump("offer_unaffordable"); continue; }
+        for (const vet of affordable.slice(0, 4)) {
+        const vetSalary = salaryForSeason(vet.contract, 0);
+        const bandFloor = minOutgoingFor(vetSalary);
+        const bandCeiling = maxIncomingFor(vetSalary);
+        // Fill the package inside [floor, ceiling]: expensive pieces that would
+        // overshoot the seller's ceiling get skipped for cheaper ones.
+        const asks: TradePlayer[] = [];
+        let sal = 0;
+        for (const p of movable) {
+          if (asks.length >= askCap || sal >= bandFloor) break;
+          const pSal = salaryForSeason(p.contract, 0);
+          if (sal + pSal > bandCeiling) continue;
+          asks.push(p);
+          sal += pSal;
+        }
+        const userFirst = user.picks
+          .filter((pk) => pk.status === "OWNED" && pk.round === 1 && pk.originalTeamId === user.id && pk.year > season && pk.year <= season + CBA.pickTradeYears && (!pk.protection || pk.protection.type === "NONE"))
+          .sort((a, b) => a.year - b.year)[0];
+        const parties: TradeParty[] = [
+          { teamId: seller.id, gives: [{ kind: "PLAYER", id: vet.id }], receives: [...asks.map((p) => ({ kind: "PLAYER" as const, id: p.id })), ...(userFirst ? [{ kind: "PICK" as const, id: userFirst.id }] : [])] },
+          { teamId: user.id, gives: [...asks.map((p) => ({ kind: "PLAYER" as const, id: p.id })), ...(userFirst ? [{ kind: "PICK" as const, id: userFirst.id }] : [])], receives: [{ kind: "PLAYER", id: vet.id }] },
+        ];
+        if (!asks.length || sal < bandFloor) { bump(`offer_no_asks:${sal.toFixed(0)}<${bandFloor.toFixed(0)}`); continue; }
+        const validation = validateTrade({ saveId, parties }, [seller, user], season);
+        if (!validation.legal) {
+          bump("offer_illegal");
+          for (const i of validation.issues.filter((x) => x.severity === "BLOCKER")) bump(`offer_illegal:${i.code}`);
+          continue;
+        }
+        // The seller offered it — verify they'd actually accept their own ask.
+        if (!aiEvaluateTrade(parties[0], { saveId, parties }, [seller, user], season).accept) { bump("offer_seller_reject"); continue; }
+        bump("offer_created");
+        const offer = {
+          id: uuid(),
+          fromTeam: seller.abbr,
+          playerId: vet.id,
+          asks: [...asks.map((p) => ({ kind: "PLAYER" as const, id: p.id })), ...(userFirst ? [{ kind: "PICK" as const, id: userFirst.id }] : [])],
+        };
+        db.update(saves)
+          .set({ phaseState: { ...psNow, inboundOffers: [offer] } as never, updatedAt: now() })
+          .where(eq(saves.id, saveId))
+          .run();
+        logEvent(saveId, "TRADE", `交易报价：${seller.abbr} 想用 ${vet.name} 换你的 ${asks.map((p) => p.name).join("、")}${userFirst ? " + 一枚首轮签" : ""}`, { offerId: offer.id });
+        offerMade = true;
+        break;
+        }
+      }
+    }
+  }
   return trades;
+}
+
+interface InboundOffer {
+  id: string;
+  fromTeam: string;
+  playerId: string;
+  asks: { kind: "PLAYER" | "PICK"; id: string }[];
+}
+
+export function listInboundOffers(saveId: string): (InboundOffer & { playerName: string; askNames: string[] })[] {
+  const db = getDb();
+  const ps = getPhaseState(saveId);
+  const offers = (ps.inboundOffers as InboundOffer[] | undefined) ?? [];
+  const full = (id: string) => (id.includes(":") ? id : `${saveId}:${id}`);
+  return offers.map((o) => {
+    const p = db.select().from(playersT).where(eq(playersT.id, full(o.playerId))).get();
+    const askNames = o.asks.map((a) => {
+      if (a.kind === "PICK") {
+        const pk = db.select().from(picksT).where(eq(picksT.id, full(a.id))).get();
+        return pk ? `${pk.year} 年${pk.round === 1 ? "首轮" : "次轮"}签` : "选秀权";
+      }
+      return db.select().from(playersT).where(eq(playersT.id, full(a.id))).get()?.name ?? a.id;
+    });
+    return { ...o, playerName: p?.name ?? "?", askNames };
+  });
+}
+
+/** The user answers an inbound AI offer. Accept → full validation + execution. */
+export function respondInboundOffer(saveId: string, offerId: string, accept: boolean) {
+  const db = getDb();
+  const ps = getPhaseState(saveId);
+  const offers = (ps.inboundOffers as InboundOffer[] | undefined) ?? [];
+  const offer = offers.find((o) => o.id === offerId);
+  if (!offer) throw new EngineError("NO_OFFER", "该报价不存在或已过期");
+  const userShort = String(ps.userTeamId ?? "").split(":").pop()!;
+  const season = getSave(saveId)!.season;
+
+  const clear = () =>
+    db.update(saves)
+      .set({ phaseState: { ...ps, inboundOffers: offers.filter((o) => o.id !== offerId) } as never, updatedAt: now() })
+      .where(eq(saves.id, saveId))
+      .run();
+
+  if (!accept) {
+    clear();
+    logEvent(saveId, "TRADE", `拒绝了 ${offer.fromTeam} 的交易报价`, { offerId });
+    return { accepted: false as const };
+  }
+  const seller = toTradeTeam(saveId, offer.fromTeam);
+  const user = toTradeTeam(saveId, userShort);
+  const parties: TradeParty[] = [
+    { teamId: seller.id, gives: [{ kind: "PLAYER", id: offer.playerId }], receives: offer.asks },
+    { teamId: user.id, gives: offer.asks, receives: [{ kind: "PLAYER", id: offer.playerId }] },
+  ];
+  const validation = validateTrade({ saveId, parties }, [seller, user], season);
+  if (!validation.legal) {
+    clear();
+    const msg = validation.issues.find((i) => i.severity === "BLOCKER")?.message ?? "交易不再合法";
+    logEvent(saveId, "TRADE", `接受报价失败：${msg}`, { offerId });
+    return { accepted: false as const, reason: msg };
+  }
+  const exec = executeTrade(saveId, parties, { note: "接受 AI 报价" });
+  clear();
+  if (exec.executed) {
+    return { accepted: true as const };
+  }
+  return { accepted: false as const, reason: "执行失败" };
 }
 
 /** Start the next regular season. */

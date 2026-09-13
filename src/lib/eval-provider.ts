@@ -20,6 +20,7 @@ export const GM_ACTIONS = [
   "get_assets",
   "get_market",
   "propose_trade",
+  "respond_trade",
   "sign_free_agent",
   "waive_player",
   "draft_pick",
@@ -34,7 +35,7 @@ export type GmAction = (typeof GM_ACTIONS)[number];
 
 /** 各阶段允许的动作（权限白名单 —— 权限测试的依据）。 */
 export const STAGE_ALLOWED_ACTIONS: Record<string, GmAction[]> = {
-  SEASON: ["get_roster", "get_assets", "get_market", "propose_trade", "waive_player", "set_strategy", "advance_season", "do_nothing"],
+  SEASON: ["get_roster", "get_assets", "get_market", "propose_trade", "respond_trade", "waive_player", "set_strategy", "advance_season", "do_nothing"],
   // Draft-night trades and roster trims are real NBA — both allowed here.
   DRAFT: ["get_roster", "get_assets", "get_market", "propose_trade", "waive_player", "draft_pick", "finish_draft", "do_nothing"],
   FREE_AGENCY: ["get_roster", "get_assets", "get_market", "propose_trade", "sign_free_agent", "waive_player", "start_new_season", "do_nothing"],
@@ -205,6 +206,8 @@ interface StubScene {
   years: number;
   rosterCount?: number;
   waiveCandidateId?: string | null;
+  inboundOfferId?: string | null;
+  inboundGood?: boolean;
   ownFaId?: string | null;
   ownFaSalary?: number;
   ownFaSigned?: boolean;
@@ -228,6 +231,13 @@ export function stubAction(scene: StubScene): GmActionPayload {
   });
 
   if (scene.stage === "SEASON") {
+    // Answer inbound AI offers first — a pending call waits for nobody.
+    if (scene.inboundOfferId) {
+      return base(scene.inboundGood ? "接受 AI 主动报价（账面不亏）" : "拒绝 AI 主动报价（筹码不值）", {
+        action: "respond_trade",
+        params: { offerId: scene.inboundOfferId, accept: scene.inboundGood === true },
+      });
+    }
     if (!scene.tradeAttempted) {
       return base("用边缘轮换+次轮签尝试换取即战力", {
         action: "propose_trade",
@@ -237,7 +247,7 @@ export function stubAction(scene: StubScene): GmActionPayload {
     if (!scene.strategySet) {
       return base("记录球队策略", { action: "set_strategy", params: { text: "Stub 策略：保持薪资灵活，逐年补强轮换深度。" } });
     }
-    return base("推进当前赛季至结束", { action: "advance_season" });
+    return base("推进约一个月赛程", { action: "advance_season" });
   }
   if (scene.stage === "DRAFT") {
     return base("选择最佳可用新秀", { action: "draft_pick", params: {} });
