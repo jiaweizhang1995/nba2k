@@ -862,6 +862,7 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
   let resigned = 0;
   let enteredFa = 0;
   let userExpired = 0;
+  const toPending: string[] = [];
   for (const p of state.players) {
     if (p.status === "PROSPECT") continue;
     const end = p.contract.years.length ? p.contract.years[p.contract.years.length - 1].season : 0;
@@ -900,6 +901,9 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
       if (p.contract.option === "TO") {
         const optSalary = p.contract.years[p.contract.years.length - 1]?.salary ?? seasonMoney(newSeason).minimumSalary;
         p.contract = { ...p.contract, years: [{ season: newSeason, salary: optSalary }], option: null };
+        // The GM may still DECLINE the option during the offseason — mark the
+        // pending decision; declineOption releases him with no dead money.
+        toPending.push(p.id.includes(":") ? p.id.split(":").pop()! : p.id);
         continue;
       }
       p.lastTeamId = p.teamId;
@@ -1016,6 +1020,13 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
   state.currentDate = `${newSeason - 1}-06-25`;
 
   persistDraftOrder(state.saveId, draftOrder, lotteryResult, worst14);
+  if (toPending.length) {
+    const ps = getPhaseState(state.saveId);
+    db2.update(saves)
+      .set({ phaseState: { ...ps, [`toPending:${newSeason}`]: toPending } as never, updatedAt: now() })
+      .where(eq(saves.id, state.saveId))
+      .run();
+  }
   const generated = ensureDraftClass(state.saveId, state.seed, newSeason);
   if (generated > 0) result.notes.push(`已生成 ${generated} 人新秀池`);
   logEvent(state.saveId, "DRAFT", `选秀大会准备就绪：乐透抽签完成（${state.season} 届）`, { lottery: round1.slice(0, 5), prospects: generated });
@@ -2796,6 +2807,41 @@ export function waivePlayer(saveId: string, playerId: string, opts: { stretch?: 
   });
   logEvent(saveId, "ROSTER", `裁掉 ${player.name}：${opts.stretch ? "延伸支付 " : ""}剩余合同共 ${total.toFixed(1)}M 分 ${deadEntries.length} 年计入死钱`, { playerId, deadEntries, total, stretch: !!opts.stretch });
   return { waived: player.name, deadMoney: deadEntries, total };
+}
+
+/**
+ * Decline a team option that was auto-exercised at the season rollover.
+ * Unlike waiving, declining an option year is FREE — unguaranteed money
+ * never hits the books. Only available during the offseason window.
+ */
+export function declineOption(saveId: string, playerId: string) {
+  const db = getDb();
+  const save = getSave(saveId);
+  if (!save) throw new EngineError("NO_SAVE", "存档不存在");
+  if (save.phase !== "DRAFT" && save.phase !== "FREE_AGENCY") {
+    throw new EngineError("WRONG_PHASE", "球队选项只能在休赛期（选秀/自由市场阶段）决定是否执行");
+  }
+  const ps = getPhaseState(saveId);
+  const key = `toPending:${save.season}`;
+  const pending = new Set<string>((ps[key] as string[] | undefined) ?? []);
+  if (!pending.has(playerId)) {
+    throw new EngineError("NO_OPTION", "该球员没有待决定的球队选项");
+  }
+  const userTeamId = String(ps.userTeamId ?? "");
+  const player = db.select().from(playersT).where(eq(playersT.id, `${saveId}:${playerId}`)).get();
+  if (!player || player.teamId !== userTeamId) {
+    throw new EngineError("NOT_OWNED", "该球员不在你的阵容中");
+  }
+  pending.delete(playerId);
+  db.transaction((tx) => {
+    tx.update(playersT)
+      .set({ teamId: null, lastTeamId: userTeamId, status: "FREE_AGENT", role: "BENCH", contract: { ...player.contract, years: [] } })
+      .where(eq(playersT.id, player.id))
+      .run();
+    tx.update(saves).set({ phaseState: { ...ps, [key]: [...pending] } as never, updatedAt: now() }).where(eq(saves.id, saveId)).run();
+  });
+  logEvent(saveId, "ROSTER", `拒绝执行 ${player.name} 的球队选项（${player.contract.years[0]?.salary.toFixed(1) ?? "?"}M）——成为自由球员，无死钱`, { playerId });
+  return { declined: player.name };
 }
 
 /**

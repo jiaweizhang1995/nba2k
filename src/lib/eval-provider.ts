@@ -23,6 +23,7 @@ export const GM_ACTIONS = [
   "respond_trade",
   "respond_offer_sheet",
   "extend_contract",
+  "decline_option",
   "set_rotation",
   "sign_free_agent",
   "waive_player",
@@ -40,8 +41,8 @@ export type GmAction = (typeof GM_ACTIONS)[number];
 export const STAGE_ALLOWED_ACTIONS: Record<string, GmAction[]> = {
   SEASON: ["get_roster", "get_assets", "get_market", "propose_trade", "respond_trade", "extend_contract", "set_rotation", "sign_free_agent", "waive_player", "set_strategy", "advance_season", "do_nothing"],
   // Draft-night trades and roster trims are real NBA — both allowed here.
-  DRAFT: ["get_roster", "get_assets", "get_market", "propose_trade", "extend_contract", "set_rotation", "waive_player", "draft_pick", "finish_draft", "do_nothing"],
-  FREE_AGENCY: ["get_roster", "get_assets", "get_market", "propose_trade", "respond_offer_sheet", "set_rotation", "sign_free_agent", "waive_player", "start_new_season", "do_nothing"],
+  DRAFT: ["get_roster", "get_assets", "get_market", "propose_trade", "extend_contract", "decline_option", "set_rotation", "waive_player", "draft_pick", "finish_draft", "do_nothing"],
+  FREE_AGENCY: ["get_roster", "get_assets", "get_market", "propose_trade", "respond_offer_sheet", "decline_option", "set_rotation", "sign_free_agent", "waive_player", "start_new_season", "do_nothing"],
   DONE: [],
 };
 
@@ -222,6 +223,7 @@ interface StubScene {
   extensionId?: string | null;
   extensionSalary?: number;
   extensionsTried?: number;
+  optionDeclineId?: string | null;
 }
 
 /**
@@ -279,6 +281,13 @@ export function stubAction(scene: StubScene): GmActionPayload {
       return base(scene.offerSheetMatch ? "匹配报价单留住受限自由球员" : "放弃匹配放走末端球员", {
         action: "respond_offer_sheet",
         params: { sheetId: scene.offerSheetId, match: scene.offerSheetMatch === true },
+      });
+    }
+    // 溢价球队选项直接拒绝——选项年无保障，放人零死钱
+    if (scene.optionDeclineId) {
+      return base("拒绝执行溢价球队选项，免费释放名额", {
+        action: "decline_option",
+        params: { playerId: scene.optionDeclineId },
       });
     }
     // 超员先裁员（常规赛开打前名单必须 ≤18）

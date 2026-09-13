@@ -31,6 +31,7 @@ import { decryptKey, encryptKey, maskKey } from "@/lib/eval-crypto";
 import {
   advanceSim,
   deadCapHit,
+  declineOption,
   executeTrade,
   getAiTradeFeedback,
   getChemistry,
@@ -253,6 +254,8 @@ function teamRoster(evalRow: { saveId: string; teamFullId: string; season?: numb
       noTrade: p.contract.noTrade,
       // PO on the final year = he can walk this summer; TO = our call.
       option: p.contract.option,
+      // TO auto-exercised at rollover — still declinable this offseason.
+      optionPending: (getPhaseState(evalRow.saveId)[`toPending:${season}`] as string[] | undefined)?.includes(shortId(p.id)) === true,
       // Morale signal: losing teams and buried talent erode satisfaction;
       // a disgruntled star is a trade-demand waiting to happen.
       morale: p.satisfaction <= 40 ? "UNHAPPY" : p.satisfaction <= 58 ? "UNEASY" : "CONTENT",
@@ -658,6 +661,7 @@ const SYSTEM_PROMPT = `你是篮球经理模拟游戏《HARDWOOD GM》中的球�
 - propose_trade：params = { partnerTeamId, givePlayerIds[], givePickIds[], receivePlayerIds[], receivePickIds[], pickProtections? }（partnerTeamId 用球队 teamId，其余用球员/选秀权的 id；pickProtections = {送出的首轮id: {x: N}} 可谈判前 N 顺位保护——保护的签价值打折但更容易成交/绕过选秀权限制）
 - respond_trade：params = { offerId, accept }（回应 inboundOffers 里 AI 球队的主动报价；accept=true 接受，false 拒绝；报价有约 4 天有效期 expiresOn，逾期对方撤回）
 - respond_offer_sheet：params = { sheetId, match }（回应 offerSheets 里对你受限自由球员的报价单；match=true 按报价单条款留人，false 放人）
+- decline_option：params = { playerId }（拒绝执行 roster[].optionPending 球员的球队选项——无死钱，他成为自由球员；仅休赛期）
 - extend_contract：params = { playerId, extraYears, avgSalary }（提前续约还剩 ≤2 年合同的我方球员：首年 ≤ 末年薪资140%、年限 ≥2、价格约要价 95%（≤25 岁新星不打折）；锁定他免于进自由市场）
 - set_rotation：params = { starters: [5 个球员 id], minutes?: {球员id: 分钟} }（设定首发与上场时间；伤停球员不能首发；轮换深度影响战绩与士气）
 - sign_free_agent：params = { playerId, years, avgSalary }（自由市场阶段按报价签约；常规赛期间只能签赛季剩余底薪合同，球员 id 来自 freeAgents[].id；注意 AI 球队也会在赛季中底薪补强伤病阵容——好货不等人）
@@ -681,6 +685,7 @@ const SYSTEM_PROMPT = `你是篮球经理模拟游戏《HARDWOOD GM》中的球�
 - 裁员后剩余合同变为死钱仍占工资帽——裁大合同要三思。
 - roster[].morale 反映球员士气：输球文化和被埋没的天赋会让球星 UNHAPPY——不处理可能贬值甚至逼宫。
 - 球员选项年（contract.option=PO）由球员自己决定：市场价远超选项年薪或士气低他会跳出去（成为自由球员，你有鸟权可留），溢价老将多半执行。
+- 球队选项年（option=TO）默认自动执行；optionPending=true 表示仍可反悔——用 decline_option 拒绝执行放他进自由市场（无死钱，但失去他）。
 - 年轻球员的成长吃真实上场时间：≤24 岁球员每季打 ≥40 场且场均 ≥20 分钟会加速成长，枯坐板凳（<25 场或 <8 分钟）则停滞——练新人还是冲战绩是你每个赛季的真实权衡。
 - 新秀合同到期的球员是受限自由球员（freeAgents[].restricted=true）：别队签他你只能匹配报价单（offerSheets，3 天或休赛期结束前决定，match 则按报价条款留人、可超帽），放弃或超期即白白放走；同理你签别队的受限自由球员也可能被母队匹配而落空。
 - 交易在 SEASON/DRAFT/FREE_AGENCY 阶段均可提议，但常规赛交易窗口在 2 月 6 日截止日关闭（之后只能等到休赛期）；get_market 可查看全联盟各队的 phase（CONTENDER/PLAYOFF/BUBBLE/REBUILD）、薪资空间与核心球员，用于挑选交易对象。`;
@@ -840,6 +845,17 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
       needsRotation,
       starterIds: healthyTop5,
       waiveCandidateId: myPlayers[0] ? shortId(myPlayers[0].id) : null,
+      // Decline the option on a pending TO whose salary outruns his value.
+      optionDeclineId: (() => {
+        const pending = new Set((getPhaseState(evalRow.saveId)[`toPending:${getSave(evalRow.saveId)?.season ?? 0}`] as string[] | undefined) ?? []);
+        if (!pending.size) return null;
+        const cand = myPlayers
+          .filter((p) => pending.has(shortId(p.id)))
+          .sort((a, b) => (b.contract.years[0]?.salary ?? 0) - b.ratings.overall * 0.3 - ((a.contract.years[0]?.salary ?? 0) - a.ratings.overall * 0.3))[0];
+        if (!cand) return null;
+        const sal = cand.contract.years[0]?.salary ?? 0;
+        return sal > 6 && cand.ratings.overall < 74 ? shortId(cand.id) : null;
+      })(),
       // Stretch when the cut candidate carries real money — spreading the
       // dead cap is what a sensible GM does with a big dead deal.
       waiveStretch: (() => {
@@ -1012,6 +1028,11 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
             isAction: true,
             legal: r.extended,
           };
+          break;
+        }
+        case "decline_option": {
+          const r = declineOption(evalRow.saveId, String(params.playerId ?? ""));
+          toolResult = { summary: `拒绝球队选项：${r.declined} 成为自由球员（无死钱）`, isAction: true, legal: true };
           break;
         }
         case "respond_offer_sheet": {

@@ -460,6 +460,37 @@ describe("player options are the player's call", () => {
   }, 300_000);
 });
 
+describe("team options can be declined for free", () => {
+  it("declining a pending TO releases the player with zero dead money", async () => {
+    const s = await createSave({ name: "team option decline", seed: 555095 });
+    const db = getDb();
+    const season = getSave(s.saveId)!.season;
+    const userFull = String(getPhaseState(s.saveId).userTeamId);
+    const target = db.select().from(playersT).where(and(eq(playersT.saveId, s.saveId), eq(playersT.teamId, userFull))).all()
+      .filter((p) => p.ratings.overall < 75)
+      .sort((a, b) => a.ratings.overall - b.ratings.overall)[0];
+    // TO semantics: the option year is NOT in years[] — it's created on
+    // exercise. A last-year-expired contract with option=TO rolls over and
+    // gets auto-exercised, leaving the decision pending.
+    db.update(playersT).set({ contract: { ...target.contract, option: "TO", years: [{ season, salary: 9.5 }] } }).where(eq(playersT.id, target.id)).run();
+    await advanceSim(s.saveId, "SEASON");
+    const pending = (getPhaseState(s.saveId)[`toPending:${season + 1}`] as string[] | undefined) ?? [];
+    expect(pending).toContain(target.id.split(":").pop()!);
+    const { declineOption, deadCapEntries } = await import("@/server/engine");
+    const before = deadCapEntries(s.saveId, userFull.split(":").pop()!);
+    const r = declineOption(s.saveId, target.id.split(":").pop()!);
+    expect(r.declined).toBe(target.name);
+    const after = db.select().from(playersT).where(eq(playersT.id, target.id)).get()!;
+    expect(after.status).toBe("FREE_AGENT");
+    expect(after.teamId).toBeNull();
+    // No dead money — option years are unguaranteed.
+    const dead = deadCapEntries(s.saveId, userFull.split(":").pop()!);
+    expect(dead.length).toBe(before.length);
+    // Can't decline twice.
+    expect(() => declineOption(s.saveId, target.id.split(":").pop()!)).toThrow();
+  }, 300_000);
+});
+
 describe("pick protections actually protect", () => {
   it("a lottery-protected traded pick stays home and shifts the obligation", async () => {
     const s = await createSave({ name: "protection conveys", seed: 555090 });
