@@ -241,6 +241,18 @@ describe("draft class floor", () => {
       expect(cls).toHaveLength(60);
     }
   });
+
+  it("generational talents exist across years (~18% of classes) and are visibly elite", () => {
+    let genCount = 0;
+    for (let season = 2027; season <= 2046; season++) {
+      const cls = generateDraftClass(555777, season);
+      const best = Math.max(...cls.map((p) => p.ratings.overall));
+      if (best >= 78) genCount++;
+    }
+    // 20 seasons at ~18% → expect 2-8 generational classes, never zero.
+    expect(genCount).toBeGreaterThanOrEqual(2);
+    expect(genCount).toBeLessThanOrEqual(9);
+  });
 });
 
 describe("inbound trade offers", () => {

@@ -216,7 +216,10 @@ export function generateDraftClass(seed: number, season: number, count = 60): Pr
   // Pre-roll class quality so a season can be strong or weak overall. Floor
   // is raised so even a "weak" class still has draftable talent — a real
   // class never has zero players worth a first-round pick.
-  const classStrength = rng.float(0.92, 1.12);
+  const classStrength = rng.float(0.9, 1.14);
+  // ~18% of classes carry a generational talent — a consensus #1 whose
+  // floor is already star-level. Real drafts have LeBron/Wemby years.
+  const generationalIdx = rng.chance(0.18) ? rng.int(0, 2) : -1;
 
   for (let i = 0; i < count; i++) {
     let name = `${PROSPECT_FIRST[rng.int(0, PROSPECT_FIRST.length - 1)]} ${PROSPECT_LAST[rng.int(0, PROSPECT_LAST.length - 1)]}`;
@@ -225,11 +228,12 @@ export function generateDraftClass(seed: number, season: number, count = 60): Pr
 
     const position = CLASS_POSITIONS[i % CLASS_POSITIONS.length];
     const tier = rng.next();
-    const overall = Math.round(
+    let overall = Math.round(
       (tier < 0.08 ? rng.int(70, 76) : tier < 0.3 ? rng.int(64, 69) : tier < 0.65 ? rng.int(57, 63) : rng.int(50, 56)) * classStrength,
     );
-    const age = tier < 0.4 ? rng.int(19, 20) : rng.int(19, 22);
-    const potential = Math.min(98, overall + rng.int(4, age <= 20 ? 20 : 12));
+    const age = i === generationalIdx ? rng.int(18, 19) : tier < 0.4 ? rng.int(19, 20) : rng.int(19, 22);
+    if (i === generationalIdx) overall = rng.int(78, 83);
+    const potential = Math.min(99, overall + rng.int(4, age <= 20 ? 20 : 12));
     const [h0, h1] = CLASS_HEIGHT[position];
     const [w0, w1] = CLASS_WEIGHT[position];
     const heightCm = rng.int(h0, h1);
@@ -251,9 +255,11 @@ export function generateDraftClass(seed: number, season: number, count = 60): Pr
       interiorD: bias(position === "C" ? 12 : position === "PF" ? 6 : -8),
       usageTendency: round2(rng.float(0.15, 0.45)),
       potential,
-      potentialLow: Math.max(overall + 1, potential - rng.int(4, 12)),
-      potentialHigh: Math.min(98, potential + rng.int(2, 8)),
-      confidence: round2(rng.float(0.25, 0.5)),
+      potentialLow: i === generationalIdx ? overall - rng.int(2, 5) : Math.max(overall + 1, potential - rng.int(4, 12)),
+      potentialHigh: Math.min(99, potential + rng.int(2, 8)),
+      // Consensus visibility: blue-chippers are scouted hard (high confidence);
+      // deep-draft prospects stay foggy — finding value late is the skill.
+      confidence: round2(i === generationalIdx ? rng.float(0.6, 0.75) : tier < 0.08 ? rng.float(0.5, 0.7) : tier < 0.3 ? rng.float(0.32, 0.5) : rng.float(0.2, 0.4)),
       ratingVersion: "synthetic-class-v1",
     };
 
