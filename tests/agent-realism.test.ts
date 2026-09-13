@@ -9,12 +9,14 @@ import { players as playersT, teams as teamsT, events as eventsT, saves as saves
 import {
   advanceSim,
   createSave,
+  deadCapHit,
   executeTrade,
   extendContract,
   getPhaseState,
   getSave,
   listInboundOffers,
   listOfferSheets,
+  loadLeagueState,
   makeDraftPick,
   respondInboundOffer,
   respondOfferSheet,
@@ -25,6 +27,7 @@ import {
   waivePlayer,
 } from "@/server/engine";
 import { generateDraftClass } from "@/domain/draft";
+import { applyDevelopment, devMinutesFactor } from "@/domain/sim/season";
 import { askingSalaryFor, canAfford, evaluateOffer, isRestrictedFa } from "@/domain/freeagency";
 import { CBA, maxContractValue, round2, seasonMoney } from "@/domain/salary";
 
@@ -426,6 +429,33 @@ describe("contract extensions — lock up expiring talent before the market", ()
   }, 120_000);
 });
 
+describe("stretch provision on waivers", () => {
+  it("stretching spreads dead money over 2n+1 seasons at the same total", async () => {
+    const s = await createSave({ name: "stretch", seed: 555070 });
+    const db = getDb();
+    const userFull = `${s.saveId}:${s.teamId.split(":").pop()}`;
+    const userShort = s.teamId.split(":").pop()!;
+    const season = getSave(s.saveId)!.season;
+    // Give a bench player a 2-year, 10M/yr deal, then stretch-waive him.
+    const p = db.select().from(playersT).where(and(eq(playersT.saveId, s.saveId), eq(playersT.teamId, userFull))).all()
+      .sort((a, b) => a.ratings.overall - b.ratings.overall)[0];
+    db.update(playersT)
+      .set({ contract: { ...p.contract, years: [{ season, salary: 10 }, { season: season + 1, salary: 10 }] } })
+      .where(eq(playersT.id, p.id))
+      .run();
+    const r = waivePlayer(s.saveId, p.id.split(":").pop()!, { stretch: true });
+    expect(r.waived).toBe(p.name);
+    // 2 remaining years → stretched over 5 seasons.
+    expect(r.deadMoney.length).toBe(5);
+    expect(r.deadMoney[0].season).toBe(season);
+    expect(r.deadMoney[4].season).toBe(season + 4);
+    expect(r.deadMoney[0].salary).toBeCloseTo(4, 1);
+    expect(Math.abs(r.total - 20)).toBeLessThan(0.5);
+    // And the dead cap actually lands on the user's books this season.
+    expect(deadCapHit(s.saveId, userShort)).toBeCloseTo(4, 1);
+  }, 120_000);
+});
+
 describe("in-season AI signings", () => {
   it("AI teams hit the minimum market when a star goes down", async () => {
     const s = await createSave({ name: "in-season signings", seed: 555050 });
@@ -467,6 +497,51 @@ describe("in-season AI signings", () => {
       expect(p.contract.years.length).toBe(1);
     }
   }, 300_000);
+});
+
+describe("minutes-driven development", () => {
+  it("real rotation runs accelerate growth; the bench stalls it", () => {
+    // Pure boundary check — the roll itself stays seeded/random.
+    expect(devMinutesFactor(70, 28)).toEqual({ chance: 0.15, ceil: 1 });
+    expect(devMinutesFactor(70, 10)).toEqual({ chance: 0, ceil: 0 });
+    expect(devMinutesFactor(10, 30)).toEqual({ chance: -0.15, ceil: -1 }); // barely dressed
+    expect(devMinutesFactor(0, 0)).toEqual({ chance: -0.15, ceil: -1 }); // never played
+  });
+
+  it("starters grow faster than benchwarmers across many seasons", () => {
+    // Two identical 21yo prospects (same overall/potential), one playing 25+
+    // mpg, one glued to the bench. Over 20 development windows the rotation
+    // player's total growth must clearly outpace the buried one's.
+    const mkKid = (id: string, g: number, mpg: number) => ({
+      id, name: id, teamId: "T", lastTeamId: "T", position: "SG", age: 21, yearsPro: 2, tenure: 2,
+      ratings: { overall: 70, threePoint: 70, finishing: 70, inside: 70, freeThrow: 70, playmaking: 70, rebounding: 70, perimeterD: 70, interiorD: 70, usageTendency: 50, potential: 82, potentialLow: 75, potentialHigh: 88, confidence: 50 },
+      seasonStats: [{ g, mp: g * mpg, pts: 0, reb: 0, ast: 0, stl: 0, blk: 0, tov: 0, fgm: 0, fga: 0, tpm: 0, tpa: 0, ftm: 0, fta: 0 }],
+      contract: { type: "ROOKIE" as const, years: [{ season: 2027, salary: 5 }], birdRights: false, noTrade: false, option: null, signedSeason: 2025 },
+      status: "ACTIVE", role: "BENCH", satisfaction: 70, injury: null,
+      development: { trajectory: "STABLE", growthLeft: 12, lastDelta: 0 }, stamina: 1, lastGameDate: null,
+    });
+    const starter = mkKid("kidA", 70, 25);
+    const buried = mkKid("kidB", 8, 6);
+    const state = {
+      saveId: "t", seed: 555060, season: 2027, phase: "OFFSEASON" as const, currentDate: "2027-07-01",
+      teams: [{ id: "T", abbr: "T", city: "T", name: "T", conference: "EAST" as const, division: "X", wins: 30, losses: 52 }],
+      players: [starter, buried], games: [], playoffs: null,
+    };
+    let sumA = 0, sumB = 0;
+    for (let i = 0; i < 20; i++) {
+      state.season = 2027 + i;
+      // applyDevelopment ages players — pin age/overall so every window rolls
+      // under identical conditions.
+      for (const p of [starter, buried]) {
+        p.ratings.overall = 70;
+        p.age = 21;
+      }
+      const deltas = applyDevelopment(state as never);
+      sumA += deltas.find((d) => d.playerId === "kidA")?.delta ?? 0;
+      sumB += deltas.find((d) => d.playerId === "kidB")?.delta ?? 0;
+    }
+    expect(sumA).toBeGreaterThan(sumB + 5);
+  });
 });
 
 describe("mid-level exception is a single annual exception", () => {

@@ -245,6 +245,11 @@ function teamRoster(evalRow: { saveId: string; teamFullId: string; season?: numb
       injured: !!(p.injury && p.injury.weeksRemaining > 0),
       injuryWeeks: p.injury?.weeksRemaining ?? 0,
       stamina: Math.round(p.stamina * 100),
+      gamesPlayed: p.seasonStats.find((s) => s.season === season)?.g ?? 0,
+      mpg: (() => {
+        const st = p.seasonStats.find((s) => s.season === season);
+        return st && st.g > 0 ? Math.round((st.mp / st.g) * 10) / 10 : 0;
+      })(),
       noTrade: p.contract.noTrade,
       // Morale signal: losing teams and buried talent erode satisfaction;
       // a disgruntled star is a trade-demand waiting to happen.
@@ -614,7 +619,7 @@ const SYSTEM_PROMPT = `你是篮球经理模拟游戏《HARDWOOD GM》中的球�
 - extend_contract：params = { playerId, extraYears, avgSalary }（提前续约还剩 ≤2 年合同的我方球员：首年 ≤ 末年薪资140%、年限 ≥2、价格约要价 95%（≤25 岁新星不打折）；锁定他免于进自由市场）
 - set_rotation：params = { starters: [5 个球员 id], minutes?: {球员id: 分钟} }（设定首发与上场时间；伤停球员不能首发；轮换深度影响战绩与士气）
 - sign_free_agent：params = { playerId, years, avgSalary }（自由市场阶段按报价签约；常规赛期间只能签赛季剩余底薪合同，球员 id 来自 freeAgents[].id；注意 AI 球队也会在赛季中底薪补强伤病阵容——好货不等人）
-- waive_player：params = { playerId }（裁掉我方球员；剩余合同变为死钱仍占工资帽）
+- waive_player：params = { playerId, stretch? }（裁掉我方球员；剩余合同变为死钱仍占工资帽；stretch=true 按延伸条款摊到 2×剩余年+1 个赛季——当年压力小但拖得久）
 - draft_pick：params = { prospectId? }（选秀阶段；prospectId 来自 topProspects[].id，省略则选最优）
 - finish_draft：剩余选秀全部自动完成
 - set_strategy：params = { text }（记录你的建队策略）
@@ -633,6 +638,7 @@ const SYSTEM_PROMPT = `你是篮球经理模拟游戏《HARDWOOD GM》中的球�
 - 自由市场是活的：每推进一天，AI 球队就会按市场价签人——好球员先被抢走，拖得越久池子越薄；报价远低于要价会被直接拒绝。
 - 裁员后剩余合同变为死钱仍占工资帽——裁大合同要三思。
 - roster[].morale 反映球员士气：输球文化和被埋没的天赋会让球星 UNHAPPY——不处理可能贬值甚至逼宫。
+- 年轻球员的成长吃真实上场时间：≤24 岁球员每季打 ≥40 场且场均 ≥20 分钟会加速成长，枯坐板凳（<25 场或 <8 分钟）则停滞——练新人还是冲战绩是你每个赛季的真实权衡。
 - 新秀合同到期的球员是受限自由球员（freeAgents[].restricted=true）：别队签他你只能匹配报价单（offerSheets，3 天或休赛期结束前决定，match 则按报价条款留人、可超帽），放弃或超期即白白放走；同理你签别队的受限自由球员也可能被母队匹配而落空。
 - 交易在 SEASON/DRAFT/FREE_AGENCY 阶段均可提议，但常规赛交易窗口在 2 月 6 日截止日关闭（之后只能等到休赛期）；get_market 可查看全联盟各队的 phase（CONTENDER/PLAYOFF/BUBBLE/REBUILD）、薪资空间与核心球员，用于挑选交易对象。`;
 
@@ -791,6 +797,13 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
       needsRotation,
       starterIds: healthyTop5,
       waiveCandidateId: myPlayers[0] ? shortId(myPlayers[0].id) : null,
+      // Stretch when the cut candidate carries real money — spreading the
+      // dead cap is what a sensible GM does with a big dead deal.
+      waiveStretch: (() => {
+        const c = myPlayers[0];
+        if (!c) return false;
+        return c.contract.years.reduce((a, y) => a + y.salary, 0) > 15;
+      })(),
       ownFaId: ownFa && ownFa.ratings.overall >= 70 ? shortId(ownFa.id) : null,
       ownFaSalary: ownFa ? askingSalaryFor(ownFa.contract, ownFa.yearsPro, ownFa.ratings.overall, ownFa.age, getSave(evalRow.saveId)?.season) : 0,
       ownFaSigned,
@@ -976,7 +989,7 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
           toolResult = toolSignFreeAgent({ ...evalCtx }, params);
           break;
         case "waive_player": {
-          const r = waivePlayer(evalRow.saveId, String(params.playerId ?? ""));
+          const r = waivePlayer(evalRow.saveId, String(params.playerId ?? ""), { stretch: params.stretch === true });
           toolResult = { summary: `裁掉 ${r.waived}，死钱 ${r.total.toFixed(1)}M 分 ${r.deadMoney.length} 年计入工资帽`, data: r as unknown as Record<string, unknown>, isAction: true, legal: true };
           break;
         }

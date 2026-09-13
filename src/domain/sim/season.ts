@@ -597,6 +597,18 @@ export function standings(state: LeagueState) {
   return { EAST: byConf("EAST"), WEST: byConf("WEST") };
 }
 
+/**
+ * Playing-time effect on young-player development. Real rebuilds feed kids
+ * minutes; a 21-year-old glued to the bench stagnates. Returns adjustments
+ * to the growth roll: {chance, ceil} — positive when the player actually
+ * played, dampening when he sat.
+ */
+export function devMinutesFactor(games: number, mpg: number): { chance: number; ceil: number } {
+  if (games >= 40 && mpg >= 20) return { chance: 0.15, ceil: 1 }; // real rotation run
+  if (games < 25 || mpg < 8) return { chance: -0.15, ceil: -1 }; // buried — development stalls
+  return { chance: 0, ceil: 0 };
+}
+
 /** Offseason development: growth/decline by age & potential. Deterministic. */
 export function applyDevelopment(state: LeagueState): { playerId: string; name: string; delta: number }[] {
   const out: { playerId: string; name: string; delta: number }[] = [];
@@ -618,7 +630,9 @@ export function applyDevelopment(state: LeagueState): { playerId: string; name: 
     let delta = 0;
     if (p.age <= 24 && pot != null) {
       const gap = Math.max(0, Math.min(20, pot - overall));
-      delta = rng.chance(0.25 + gap * 0.05) ? rng.int(1, Math.max(1, Math.round(gap / 2))) : rng.int(-1, 1);
+      const s = p.seasonStats[0];
+      const mf = devMinutesFactor(s?.g ?? 0, s && s.g > 0 ? s.mp / s.g : 0);
+      delta = rng.chance(0.25 + gap * 0.05 + mf.chance) ? rng.int(1, Math.max(1, Math.round(gap / 2) + mf.ceil)) : rng.int(-1, 1);
     } else if (p.age <= 28) {
       delta = rng.chance(0.4) ? rng.int(0, 2) : rng.int(-1, 0);
     } else if (p.age >= 32) {

@@ -2607,7 +2607,7 @@ export function deadCapEntries(saveId: string, teamShortId: string): DeadCapEntr
  * snapshot counts it via deadCapHit, so waiving a big contract frees a roster
  * spot but never frees the money.
  */
-export function waivePlayer(saveId: string, playerId: string) {
+export function waivePlayer(saveId: string, playerId: string, opts: { stretch?: boolean } = {}) {
   const db = getDb();
   const save = getSave(saveId);
   if (!save) throw new EngineError("NO_SAVE", "存档不存在");
@@ -2629,9 +2629,16 @@ export function waivePlayer(saveId: string, playerId: string) {
     throw new EngineError("ROSTER_MIN", `裁员后人数将低于下限 ${CBA.minRosterSize} 人`);
   }
 
-  const deadEntries: DeadCapEntry[] = player.contract.years
-    .filter((y) => y.season >= save.season)
-    .map((y) => ({ season: y.season, salary: y.salary }));
+  const remaining = player.contract.years.filter((y) => y.season >= save.season);
+  // Stretch provision (real CBA): remaining money spreads evenly over
+  // 2×remainingYears+1 seasons — less dead money now, more of it later.
+  const deadEntries: DeadCapEntry[] = opts.stretch && remaining.length
+    ? (() => {
+        const span = remaining.length * 2 + 1;
+        const per = round2(remaining.reduce((a, y) => a + y.salary, 0) / span);
+        return Array.from({ length: span }, (_, i) => ({ season: save.season + i, salary: per }));
+      })()
+    : remaining.map((y) => ({ season: y.season, salary: y.salary }));
   const total = round2(deadEntries.reduce((a, e) => a + e.salary, 0));
 
   db.transaction((tx) => {
@@ -2645,7 +2652,7 @@ export function waivePlayer(saveId: string, playerId: string) {
     waived.add(playerId);
     tx.update(saves).set({ phaseState: { ...ps, deadCap: cur, [waivedKey]: [...waived] } as never, updatedAt: now() }).where(eq(saves.id, saveId)).run();
   });
-  logEvent(saveId, "ROSTER", `裁掉 ${player.name}：剩余 ${deadEntries.length} 年合同共 ${total.toFixed(1)}M 计入死钱`, { playerId, deadEntries, total });
+  logEvent(saveId, "ROSTER", `裁掉 ${player.name}：${opts.stretch ? "延伸支付 " : ""}剩余合同共 ${total.toFixed(1)}M 分 ${deadEntries.length} 年计入死钱`, { playerId, deadEntries, total, stretch: !!opts.stretch });
   return { waived: player.name, deadMoney: deadEntries, total };
 }
 

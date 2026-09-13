@@ -209,6 +209,7 @@ interface StubScene {
   years: number;
   rosterCount?: number;
   waiveCandidateId?: string | null;
+  waiveStretch?: boolean;
   needsRotation?: boolean;
   starterIds?: string[];
   inboundOfferId?: string | null;
@@ -282,7 +283,10 @@ export function stubAction(scene: StubScene): GmActionPayload {
     }
     // 超员先裁员（常规赛开打前名单必须 ≤18）
     if ((scene.rosterCount ?? 0) > 18 && scene.waiveCandidateId) {
-      return base("裁掉阵容末端球员以满足名单上限", { action: "waive_player", params: { playerId: scene.waiveCandidateId } });
+      return base(scene.waiveStretch ? "延伸条款裁员：分摊死钱降低当季压力" : "裁掉阵容末端球员以满足名单上限", {
+        action: "waive_player",
+        params: { playerId: scene.waiveCandidateId, ...(scene.waiveStretch ? { stretch: true } : {}) },
+      });
     }
     // 自家到期球员优先用鸟权续约一次
     if (scene.ownFaId && !scene.ownFaSigned && !scene.lastTurnWasSignAttempt) {
