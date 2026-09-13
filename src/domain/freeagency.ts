@@ -55,6 +55,12 @@ export interface FaEvaluation {
  * team's one mid-level exception this offseason is already spent. */
 export type SigningMechanism = "SPACE" | "MINIMUM" | "MLE" | "NONE";
 
+/** A restricted free agent: coming off an expired rookie-scale deal — the
+ * incumbent team holds matching rights (real RFA rules). */
+export function isRestrictedFa(p: { contract: { type: string }; lastTeamId: string | null }): boolean {
+  return p.contract.type === "ROOKIE" && !!p.lastTeamId;
+}
+
 export function canAfford(team: TradeTeam, avgSalary: number, rosterAfter: number, deadMoney = 0, mleUsed = false, season: number = 2027): { ok: boolean; reason: string; mechanism: SigningMechanism } {
   const m = seasonMoney(season);
   const snap = capSnapshot(team.players.map((p) => ({ contract: p.contract })), rosterAfter, deadMoney, season);

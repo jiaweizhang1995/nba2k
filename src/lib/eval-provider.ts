@@ -21,6 +21,7 @@ export const GM_ACTIONS = [
   "get_market",
   "propose_trade",
   "respond_trade",
+  "respond_offer_sheet",
   "set_rotation",
   "sign_free_agent",
   "waive_player",
@@ -39,7 +40,7 @@ export const STAGE_ALLOWED_ACTIONS: Record<string, GmAction[]> = {
   SEASON: ["get_roster", "get_assets", "get_market", "propose_trade", "respond_trade", "set_rotation", "sign_free_agent", "waive_player", "set_strategy", "advance_season", "do_nothing"],
   // Draft-night trades and roster trims are real NBA — both allowed here.
   DRAFT: ["get_roster", "get_assets", "get_market", "propose_trade", "set_rotation", "waive_player", "draft_pick", "finish_draft", "do_nothing"],
-  FREE_AGENCY: ["get_roster", "get_assets", "get_market", "propose_trade", "set_rotation", "sign_free_agent", "waive_player", "start_new_season", "do_nothing"],
+  FREE_AGENCY: ["get_roster", "get_assets", "get_market", "propose_trade", "respond_offer_sheet", "set_rotation", "sign_free_agent", "waive_player", "start_new_season", "do_nothing"],
   DONE: [],
 };
 
@@ -214,6 +215,8 @@ interface StubScene {
   ownFaId?: string | null;
   ownFaSalary?: number;
   ownFaSigned?: boolean;
+  offerSheetId?: string | null;
+  offerSheetMatch?: boolean;
 }
 
 /**
@@ -259,6 +262,13 @@ export function stubAction(scene: StubScene): GmActionPayload {
     return base("选择最佳可用新秀", { action: "draft_pick", params: {} });
   }
   if (scene.stage === "FREE_AGENCY") {
+    // 自家受限自由球员收到报价单——优质资产必须匹配，放走等于白送
+    if (scene.offerSheetId) {
+      return base(scene.offerSheetMatch ? "匹配报价单留住受限自由球员" : "放弃匹配放走末端球员", {
+        action: "respond_offer_sheet",
+        params: { sheetId: scene.offerSheetId, match: scene.offerSheetMatch === true },
+      });
+    }
     // 超员先裁员（常规赛开打前名单必须 ≤18）
     if ((scene.rosterCount ?? 0) > 18 && scene.waiveCandidateId) {
       return base("裁掉阵容末端球员以满足名单上限", { action: "waive_player", params: { playerId: scene.waiveCandidateId } });

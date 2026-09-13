@@ -24,7 +24,7 @@ import {
   teams as teamsT,
 } from "@/db/schema";
 import { capSnapshot, seasonMoney } from "@/domain/salary";
-import { askingSalaryFor } from "@/domain/freeagency";
+import { askingSalaryFor, isRestrictedFa } from "@/domain/freeagency";
 import { providerChat, STAGE_ALLOWED_ACTIONS, type GmAction } from "@/lib/eval-provider";
 import { decryptKey, encryptKey, maskKey } from "@/lib/eval-crypto";
 import {
@@ -38,9 +38,11 @@ import {
   getPhaseState,
   getSave,
   listInboundOffers,
+  listOfferSheets,
   loadLeagueState,
   makeDraftPick,
   respondInboundOffer,
+  respondOfferSheet,
   setRotation,
   startFreeAgency,
   startNewSeason,
@@ -289,6 +291,7 @@ function toolGetAssets(evalRow: { saveId: string; teamFullId: string; seed: numb
 
 function toolGetMarket(evalRow: { saveId: string; teamFullId: string; seed: number; season: number }): ToolResult {
   const db = getDb();
+  const sheetPlayerIds = new Set(listOfferSheets(evalRow.saveId).map((s) => s.playerId));
   const fas = db
     .select()
     .from(playersT)
@@ -306,6 +309,9 @@ function toolGetMarket(evalRow: { saveId: string; teamFullId: string; seed: numb
       // Own expired player: we hold Bird rights and can re-sign over the cap.
       fromMyTeam: p.lastTeamId === evalRow.teamFullId,
       lastTeamAbbr: p.lastTeamId ? shortId(p.lastTeamId) : null,
+      // Expired rookie-scale deal → restricted FA: the last team can match.
+      restricted: isRestrictedFa(p),
+      underOfferSheet: sheetPlayerIds.has(p.id),
     }))
     .sort((a, b) => b.overall - a.overall)
     .slice(0, 16);
@@ -564,6 +570,9 @@ function buildObservation(evalRow: { saveId: string; teamFullId: string; teamSho
     // we hold Bird rights (re-signable over the cap). Plan before FA opens.
     expiringThisOffseason: fullRoster.filter((p) => p.expiring).map((p) => ({ id: p.id, name: p.name, overall: p.overall, salary: p.salary })),
     inboundOffers: listInboundOffers(evalRow.saveId).map((o) => ({ offerId: o.id, fromTeam: o.fromTeam, theyGive: o.playerName, theyWant: o.askNames })),
+    // Offer sheets on YOUR restricted free agents — match (respond_offer_sheet)
+    // or lose him when the sheet expires.
+    offerSheets: listOfferSheets(evalRow.saveId).map((s) => ({ sheetId: s.id, playerId: shortId(s.playerId), fromTeam: shortId(s.fromTeamId), salary: s.salary, years: s.years, expiresOn: s.expiresOn })),
     recentEvents,
   };
   if (stage === "DRAFT") {
@@ -595,6 +604,7 @@ const SYSTEM_PROMPT = `你是篮球经理模拟游戏《HARDWOOD GM》中的球�
 - get_roster / get_assets / get_market：查看信息（返回的对象都带 id 字段，动作参数必须使用这些 id，禁止猜测）
 - propose_trade：params = { partnerTeamId, givePlayerIds[], givePickIds[], receivePlayerIds[], receivePickIds[] }（partnerTeamId 用球队 teamId，其余用球员/选秀权的 id）
 - respond_trade：params = { offerId, accept }（回应 inboundOffers 里 AI 球队的主动报价；accept=true 接受，false 拒绝）
+- respond_offer_sheet：params = { sheetId, match }（回应 offerSheets 里对你受限自由球员的报价单；match=true 按报价单条款留人，false 放人）
 - set_rotation：params = { starters: [5 个球员 id], minutes?: {球员id: 分钟} }（设定首发与上场时间；伤停球员不能首发；轮换深度影响战绩与士气）
 - sign_free_agent：params = { playerId, years, avgSalary }（自由市场阶段按报价签约；常规赛期间只能签赛季剩余底薪合同，球员 id 来自 freeAgents[].id）
 - waive_player：params = { playerId }（裁掉我方球员；剩余合同变为死钱仍占工资帽）
@@ -616,6 +626,7 @@ const SYSTEM_PROMPT = `你是篮球经理模拟游戏《HARDWOOD GM》中的球�
 - 自由市场是活的：每推进一天，AI 球队就会按市场价签人——好球员先被抢走，拖得越久池子越薄；报价远低于要价会被直接拒绝。
 - 裁员后剩余合同变为死钱仍占工资帽——裁大合同要三思。
 - roster[].morale 反映球员士气：输球文化和被埋没的天赋会让球星 UNHAPPY——不处理可能贬值甚至逼宫。
+- 新秀合同到期的球员是受限自由球员（freeAgents[].restricted=true）：别队签他你只能匹配报价单（offerSheets，3 天或休赛期结束前决定，match 则按报价条款留人、可超帽），放弃或超期即白白放走；同理你签别队的受限自由球员也可能被母队匹配而落空。
 - 交易在 SEASON/DRAFT/FREE_AGENCY 阶段均可提议，但常规赛交易窗口在 2 月 6 日截止日关闭（之后只能等到休赛期）；get_market 可查看全联盟各队的 phase（CONTENDER/PLAYOFF/BUBBLE/REBUILD）、薪资空间与核心球员，用于挑选交易对象。`;
 
 interface StepOutcome {
@@ -784,6 +795,18 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
           .from(evalTurnsT)
           .where(and(eq(evalTurnsT.evaluationId, evalRow.id), eq(evalTurnsT.turnIndex, evalRow.turnIndex)))
           .get()?.action === "sign_free_agent",
+      offerSheetId: (() => {
+        const s = listOfferSheets(evalRow.saveId)[0];
+        return s ? s.id : null;
+      })(),
+      offerSheetMatch: (() => {
+        const s = listOfferSheets(evalRow.saveId)[0];
+        if (!s) return false;
+        const ovr = db.select().from(playersT).where(eq(playersT.id, s.playerId)).get()?.ratings.overall ?? 0;
+        // Stub policy: match sheets on real contributors — losing an asset for
+        // nothing is how rebuilds stall.
+        return ovr >= 72;
+      })(),
       inboundOfferId: (() => {
         const o = listInboundOffers(evalRow.saveId)[0];
         return o ? o.id : null;
@@ -893,6 +916,15 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
           const r = respondInboundOffer(evalRow.saveId, String(params.offerId ?? ""), params.accept === true);
           toolResult = {
             summary: r.accepted ? "接受了 AI 球队的交易报价，交易完成" : `报价处理：${(r as { reason?: string }).reason ?? "已拒绝"}`,
+            isAction: true,
+            legal: true,
+          };
+          break;
+        }
+        case "respond_offer_sheet": {
+          const r = respondOfferSheet(evalRow.saveId, String(params.sheetId ?? ""), params.match === true);
+          toolResult = {
+            summary: r.matched ? `匹配报价单：${r.player} 留队` : `放弃匹配：${r.player} 离队`,
             isAction: true,
             legal: true,
           };

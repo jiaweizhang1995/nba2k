@@ -98,7 +98,7 @@ export const SEASON_MIN_REST_DAYS = 2;
 /** Max consecutive home or away games before a venue flip is forced. */
 export const SEASON_MAX_HOME_AWAY_STREAK = 3;
 
-function isoAddDays(iso: string, days: number): string {
+export function isoAddDays(iso: string, days: number): string {
   const d = new Date(iso + "T00:00:00Z");
   d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);

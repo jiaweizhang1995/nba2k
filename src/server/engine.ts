@@ -26,13 +26,13 @@ import { generateDemoLeague, DEMO_PROVIDER, DEMO_LICENSE, demoSource } from "@/d
 import { loadRealPayload } from "@/data/real";
 import { importData } from "./import";
 import { RATING_VERSION } from "@/domain/ratings";
-import { createSchedule, advanceDay, applyDevelopment, applyMonthlyMorale, seasonScore, type LeagueState, type LeaguePlayer, type LeagueTeam, type LeagueGame } from "@/domain/sim/season";
+import { createSchedule, advanceDay, applyDevelopment, applyMonthlyMorale, isoAddDays, seasonScore, type LeagueState, type LeaguePlayer, type LeagueTeam, type LeagueGame } from "@/domain/sim/season";
 import { CBA, CBA_VERSION, capSnapshot, round2, maxContractValue, contractEndSeason, salaryForSeason, seasonMoney } from "@/domain/salary";
 import { validateTrade, generateTradeOffers, TRADE_RULES_VERSION, aiEvaluateTrade, needPremium, playerValue, type TradeTeam, type TradePlayer, type TradePick } from "@/domain/trade";
 import { computeChemistry, CHEMISTRY_VERSION } from "@/domain/chemistry";
 import { runLottery, aiDraftPick, prospectRookieContract, generateScoutingReport, registerProspectRatings, generateDraftClass, type DraftProspect } from "@/domain/draft";
 import { hashSeed, rngFor } from "@/domain/rng";
-import { canAfford, evaluateOffer, aiCompetitionLevel, suggestedContract, askingSalaryFor } from "@/domain/freeagency";
+import { canAfford, evaluateOffer, aiCompetitionLevel, suggestedContract, askingSalaryFor, isRestrictedFa } from "@/domain/freeagency";
 import { classifyTeamPhase } from "@/domain/aiGm";
 import type { SeasonPhase, TradeParty, DevelopmentState } from "@/domain/types";
 
@@ -1882,6 +1882,36 @@ const AI_APRON_FILLER_MAX = 74; // above the second apron only low-tier players 
 type FaRow = typeof playersT.$inferSelect;
 
 /** One AI team's shot at one free agent at honest market value. */
+/** What an AI team can actually offer this FA: cap space → MLE → minimum,
+ * mirroring the branches in aiTrySignFreeAgent. null = can't afford. */
+function aiAffordableSalary(
+  c: { ratings: { overall: number } },
+  roster: unknown[],
+  snap: ReturnType<typeof capSnapshot>,
+  offerSalary: number,
+  asking: number,
+  mleUsed: boolean,
+  money: ReturnType<typeof seasonMoney>,
+): number | null {
+  void roster;
+  let salary: number | null = null;
+  if (!snap.overCap) salary = Math.min(offerSalary, snap.capSpace);
+  else if (!snap.overSecondApron && !mleUsed) salary = Math.min(offerSalary, money.midLevelException);
+  else if (c.ratings.overall < AI_APRON_FILLER_MAX) salary = money.minimumSalary;
+  if (salary == null || salary < money.minimumSalary) return null;
+  if (salary < asking * 0.88 && salary > money.minimumSalary + 0.01) return null;
+  return salary;
+}
+
+interface FaOfferSheet {
+  id: string;
+  playerId: string;      // full id
+  fromTeamId: string;    // full id of the AI team extending the sheet
+  salary: number;
+  years: number;
+  expiresOn: string;     // date; incumbent has until then to match
+}
+
 function aiTrySignFreeAgent(
   q: Pick<ReturnType<typeof getDb>, "select" | "update">,
   saveId: string,
@@ -1914,14 +1944,10 @@ function aiTrySignFreeAgent(
   );
   const money = seasonMoney(season);
   const snap = capSnapshot(roster, roster.length, 0, season);
-  let salary: number | null = null;
-  if (!snap.overCap) salary = Math.min(offer.avgSalary, snap.capSpace);
-  else if (!snap.overSecondApron && !opts.mleUsed) salary = Math.min(offer.avgSalary, money.midLevelException);
-  else if (c.ratings.overall < AI_APRON_FILLER_MAX) salary = money.minimumSalary;
-  if (salary == null || salary < money.minimumSalary) return null;
   // Money floor (same rule the user's offers face): a player with a market
   // doesn't take <88% of his ask because it's all the room a team has left.
-  if (salary < asking * 0.88 && salary > money.minimumSalary + 0.01) return null;
+  const salary = aiAffordableSalary(c, roster, snap, offer.avgSalary, asking, opts.mleUsed, money);
+  if (salary == null) return null;
   const years = Math.max(1, Math.min(CBA.maxContractYears, c.age >= 32 ? 2 : 3));
   q.update(playersT)
     .set({
@@ -1968,16 +1994,118 @@ function runAiFreeAgencyDay(saveId: string, date: string): number {
     .all()
     .filter((p) => p.teamId === null)
     .sort((a, b) => b.ratings.overall - a.ratings.overall);
+
+  // Offer sheets come due: unmatched sheets finalize to the offering team.
+  const sheetKey = `offerSheets:${save.season}`;
+  const sheets = [...((ps[sheetKey] as FaOfferSheet[] | undefined) ?? [])];
+  const money = seasonMoney(save.season);
+  let sheetsChanged = false;
+  for (const sh of sheets.filter((s) => date >= s.expiresOn)) {
+    const p = db.select().from(playersT).where(eq(playersT.id, sh.playerId)).get();
+    if (p && p.status === "FREE_AGENT") {
+      db.update(playersT)
+        .set({
+          teamId: sh.fromTeamId,
+          lastTeamId: sh.fromTeamId,
+          status: "ACTIVE",
+          role: "BENCH",
+          contract: {
+            type: sh.salary >= money.salaryCap * 0.28 ? "MAX" : "VETERAN",
+            years: Array.from({ length: sh.years }, (_, i) => ({ season: save.season + i, salary: sh.salary })),
+            birdRights: false,
+            noTrade: false,
+            option: null,
+            signedSeason: save.season,
+          },
+        })
+        .where(eq(playersT.id, sh.playerId))
+        .run();
+      logEvent(saveId, "FA", `报价单未被匹配：${p.name} 加盟 ${shortId(sh.fromTeamId)}（${sh.salary}M × ${sh.years} 年）`, { playerId: sh.playerId, teamId: sh.fromTeamId });
+    }
+    sheets.splice(sheets.indexOf(sh), 1);
+    sheetsChanged = true;
+  }
+  if (sheetsChanged) {
+    db.update(saves).set({ phaseState: { ...getPhaseState(saveId), [sheetKey]: sheets } as never, updatedAt: now() }).where(eq(saves.id, saveId)).run();
+  }
+  const pendingSheets = new Set(sheets.map((s) => s.playerId));
+
   if (!pool.length || !aiTeamIds.length) return 0;
 
   let signed = 0;
   const MAX_SIGNINGS_PER_DAY = 4;
   for (const c of pool) {
     if (signed >= MAX_SIGNINGS_PER_DAY) break;
+    if (pendingSheets.has(c.id)) continue; // under an offer sheet — awaiting the match window
     // Signing speed scales with talent: stars go early in July, minimum-tier
     // bodies linger into camp — like the real market.
     const chance = Math.min(0.85, Math.max(0.03, (c.ratings.overall - 62) * 0.05));
     if (!rng.chance(chance)) continue;
+    const asking = askingSalaryFor(c.contract, c.yearsPro, c.ratings.overall, c.age, save.season);
+    const suggested = suggestedContract(
+      { id: c.id, name: c.name, position: c.position, age: c.age, ratings: { overall: c.ratings.overall, potential: c.ratings.potential }, status: "FREE_AGENT", askingSalary: asking, askingYears: Math.max(1, Math.min(4, c.age >= 32 ? 2 : 4)), contract: c.contract },
+      save.season,
+    ).avgSalary;
+
+    // Restricted FA on the USER's expired rookie: suitors extend an offer
+    // sheet (3 days to match) instead of signing him outright. That's how a
+    // GM learns his young core is being poached — and gets to respond.
+    if (isRestrictedFa(c) && c.lastTeamId === userFull) {
+      const suitors = [...aiTeamIds].sort(() => rng.float(0, 1) - rng.float(0, 1));
+      for (const teamId of suitors) {
+        const roster = db.select().from(playersT).where(and(eq(playersT.saveId, saveId), eq(playersT.teamId, teamId))).all()
+          .filter((p) => p.status === "ACTIVE" || p.status === "INJURED");
+        if (roster.length >= AI_ROSTER_TARGET) continue;
+        const snap = capSnapshot(roster, roster.length, 0, save.season);
+        const sal = aiAffordableSalary(c, roster, snap, suggested, asking, mleUsed.has(teamId), money);
+        if (sal == null) continue;
+        const sheet: FaOfferSheet = {
+          id: `sheet:${c.id.split(":").slice(1).join(":")}`,
+          playerId: c.id,
+          fromTeamId: teamId,
+          salary: sal,
+          years: Math.max(1, Math.min(CBA.maxContractYears, c.age >= 32 ? 2 : 3)),
+          expiresOn: isoAddDays(date, 3),
+        };
+        sheets.push(sheet);
+        db.update(saves).set({ phaseState: { ...getPhaseState(saveId), [sheetKey]: sheets } as never, updatedAt: now() }).where(eq(saves.id, saveId)).run();
+        logEvent(saveId, "FA", `报价单：${shortId(teamId)} 向你的受限自由球员 ${c.name} 开出 ${sal.toFixed(1)}M × ${sheet.years} 年——3 天内可匹配或放人`, { sheetId: sheet.id, playerId: c.id, teamId });
+        if (snap.overCap && sal > money.minimumSalary + 0.01) mleUsed.add(teamId);
+        break;
+      }
+      continue;
+    }
+
+    // Restricted FA on an AI incumbent: the incumbent can match. Better
+    // players get matched more often — that's the whole point of RFA.
+    if (isRestrictedFa(c) && c.lastTeamId && c.lastTeamId !== userFull) {
+      const matchProb = c.ratings.overall >= 85 ? 0.85 : c.ratings.overall >= 75 ? 0.7 : 0.5;
+      if (rng.chance(matchProb)) {
+        const inc = c.lastTeamId;
+        const years = Math.max(1, Math.min(CBA.maxContractYears, c.age >= 32 ? 2 : 3));
+        db.update(playersT)
+          .set({
+            teamId: inc,
+            status: "ACTIVE",
+            role: "BENCH",
+            contract: {
+              type: suggested >= money.salaryCap * 0.28 ? "MAX" : "VETERAN",
+              years: Array.from({ length: years }, (_, i) => ({ season: save.season + i, salary: round2(suggested) })),
+              birdRights: false,
+              noTrade: false,
+              option: null,
+              signedSeason: save.season,
+            },
+          })
+          .where(eq(playersT.id, c.id))
+          .run();
+        logEvent(saveId, "FA", `${shortId(inc)} 匹配报价留住受限自由球员 ${c.name}`, { playerId: c.id, teamId: inc });
+        signed++;
+        continue;
+      }
+      // unmatched → falls through to normal signing below
+    }
+
     // Suitors in a deterministic shuffle; first affordable team lands him.
     const suitors = [...aiTeamIds].sort(() => rng.float(0, 1) - rng.float(0, 1));
     for (const teamId of suitors) {
@@ -2023,6 +2151,38 @@ export function startNewSeason(saveId: string) {
     if (userCount > CBA.maxRosterSize) {
       throw new EngineError("ROSTER_MAX", `常规赛名单最多 ${CBA.maxRosterSize} 人（当前 ${userCount} 人）——先裁掉 ${userCount - CBA.maxRosterSize} 名球员`);
     }
+  }
+
+  // Closing the FA window forfeits any unmatched offer sheets — silence is a
+  // decision. Each pending sheet finalizes to the offering team.
+  const sheetKey = `offerSheets:${save.season}`;
+  const pendingSheets = [...((getPhaseState(saveId)[sheetKey] as FaOfferSheet[] | undefined) ?? [])];
+  if (pendingSheets.length) {
+    const money = seasonMoney(save.season);
+    for (const sh of pendingSheets) {
+      const p = db.select().from(playersT).where(eq(playersT.id, sh.playerId)).get();
+      if (p?.status === "FREE_AGENT") {
+        db.update(playersT)
+          .set({
+            teamId: sh.fromTeamId,
+            lastTeamId: sh.fromTeamId,
+            status: "ACTIVE",
+            role: "BENCH",
+            contract: {
+              type: sh.salary >= money.salaryCap * 0.28 ? "MAX" : "VETERAN",
+              years: Array.from({ length: sh.years }, (_, i) => ({ season: save.season + i, salary: sh.salary })),
+              birdRights: false,
+              noTrade: false,
+              option: null,
+              signedSeason: save.season,
+            },
+          })
+          .where(eq(playersT.id, sh.playerId))
+          .run();
+        logEvent(saveId, "FA", `报价单到期未匹配：${p.name} 加盟 ${shortId(sh.fromTeamId)}`, { sheetId: sh.id, playerId: sh.playerId });
+      }
+    }
+    db.update(saves).set({ phaseState: { ...getPhaseState(saveId), [sheetKey]: [] } as never, updatedAt: now() }).where(eq(saves.id, saveId)).run();
   }
 
   // AI teams' competitive phase is re-evaluated from last season's standings
@@ -2342,6 +2502,36 @@ export function submitFaOffer(saveId: string, playerId: string, years: number, a
     return { accepted: false as const, reason: evalResult.reasons.join("；"), interest: evalResult.interest };
   }
 
+  // Restricted free agency: poaching another team's expired rookie is never
+  // instant — the incumbent holds matching rights and usually keeps a good
+  // young player. Matched = the offer sheet just re-signed him for them.
+  if (isRestrictedFa(player) && player.lastTeamId && player.lastTeamId !== `${saveId}:${userShort}`) {
+    const matchProb = player.ratings.overall >= 85 ? 0.85 : player.ratings.overall >= 75 ? 0.7 : 0.5;
+    const rfaRng = rngFor(save.seed, `rfa-match:${save.season}:${playerId}`);
+    if (rfaRng.chance(matchProb)) {
+      const inc = player.lastTeamId;
+      db.update(playersT)
+        .set({
+          teamId: inc,
+          status: "ACTIVE",
+          role: "BENCH",
+          contract: {
+            type: avgSalary >= money.salaryCap * 0.28 ? "MAX" : "VETERAN",
+            years: Array.from({ length: years }, (_, i) => ({ season: save.season + i, salary: Math.round(avgSalary * 100) / 100 })),
+            birdRights: false,
+            noTrade: false,
+            option: null,
+            signedSeason: save.season,
+          },
+        })
+        .where(eq(playersT.id, `${saveId}:${playerId}`))
+        .run();
+      recordOffer("REJECTED", "母队匹配报价");
+      logEvent(saveId, "FA", `${shortId(inc)} 匹配报价单，受限自由球员 ${player.name} 留队`, { playerId, teamId: inc, avgSalary });
+      return { accepted: false as const, reason: `受限自由球员：母队 ${shortId(inc)} 匹配了你的报价，球员留队`, interest: evalResult.interest };
+    }
+  }
+
   db.transaction((tx) => {
     recordOffer("ACCEPTED");
     tx.update(playersT)
@@ -2444,6 +2634,62 @@ export function waivePlayer(saveId: string, playerId: string) {
   });
   logEvent(saveId, "ROSTER", `裁掉 ${player.name}：剩余 ${deadEntries.length} 年合同共 ${total.toFixed(1)}M 计入死钱`, { playerId, deadEntries, total });
   return { waived: player.name, deadMoney: deadEntries, total };
+}
+
+/** Respond to an offer sheet on your restricted free agent: match keeps him
+ * at the sheet's terms (Bird-style, may exceed the cap); declining or letting
+ * it expire sends him to the offering team. */
+export function respondOfferSheet(saveId: string, sheetId: string, match: boolean) {
+  const db = getDb();
+  const save = getSave(saveId);
+  if (!save) throw new EngineError("NO_SAVE", "存档不存在");
+  const sheetKey = `offerSheets:${save.season}`;
+  const ps = getPhaseState(saveId);
+  const sheets = [...((ps[sheetKey] as FaOfferSheet[] | undefined) ?? [])];
+  const sheet = sheets.find((s) => s.id === sheetId);
+  if (!sheet) throw new EngineError("NO_SHEET", "报价单不存在或已处理");
+  const userFull = (ps.userTeamId as string | undefined) ?? null;
+  const player = db.select().from(playersT).where(eq(playersT.id, sheet.playerId)).get();
+  if (!player) throw new EngineError("NO_PLAYER", "球员不存在");
+  const money = seasonMoney(save.season);
+
+  const targetTeam = match ? userFull : sheet.fromTeamId;
+  if (match && userFull) {
+    const rosterCount = db.select().from(playersT).where(and(eq(playersT.saveId, saveId), eq(playersT.teamId, userFull))).all()
+      .filter((p) => p.status === "ACTIVE" || p.status === "INJURED").length;
+    if (rosterCount + 1 > CBA.offseasonRosterMax) {
+      throw new EngineError("ROSTER_MAX", `匹配后人数超过上限 ${CBA.offseasonRosterMax}`);
+    }
+  }
+  db.transaction((tx) => {
+    tx.update(playersT)
+      .set({
+        teamId: targetTeam,
+        lastTeamId: targetTeam,
+        status: "ACTIVE",
+        role: "BENCH",
+        contract: {
+          type: sheet.salary >= money.salaryCap * 0.28 ? "MAX" : "VETERAN",
+          years: Array.from({ length: sheet.years }, (_, i) => ({ season: save.season + i, salary: sheet.salary })),
+          birdRights: false,
+          noTrade: false,
+          option: null,
+          signedSeason: save.season,
+        },
+      })
+      .where(eq(playersT.id, sheet.playerId))
+      .run();
+    sheets.splice(sheets.indexOf(sheet), 1);
+    tx.update(saves).set({ phaseState: { ...getPhaseState(saveId), [sheetKey]: sheets } as never, updatedAt: now() }).where(eq(saves.id, saveId)).run();
+  });
+  logEvent(saveId, "FA", match ? `匹配报价单：${player.name} 留队（${sheet.salary}M × ${sheet.years} 年）` : `放弃匹配：${player.name} 加盟 ${shortId(sheet.fromTeamId)}`, { sheetId, playerId: sheet.playerId });
+  return { matched: match, player: player.name };
+}
+
+export function listOfferSheets(saveId: string): FaOfferSheet[] {
+  const save = getSave(saveId);
+  if (!save) return [];
+  return ((getPhaseState(saveId)[`offerSheets:${save.season}`] as FaOfferSheet[] | undefined) ?? []);
 }
 
 /**

@@ -5,22 +5,25 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
-import { players as playersT, teams as teamsT, events as eventsT } from "@/db/schema";
+import { players as playersT, teams as teamsT, events as eventsT, saves as savesT } from "@/db/schema";
 import {
   advanceSim,
   createSave,
   executeTrade,
+  getPhaseState,
   getSave,
   listInboundOffers,
+  listOfferSheets,
   makeDraftPick,
   respondInboundOffer,
+  respondOfferSheet,
   setRotation,
   startNewSeason,
   submitFaOffer,
   waivePlayer,
 } from "@/server/engine";
 import { generateDraftClass } from "@/domain/draft";
-import { askingSalaryFor, canAfford, evaluateOffer } from "@/domain/freeagency";
+import { askingSalaryFor, canAfford, evaluateOffer, isRestrictedFa } from "@/domain/freeagency";
 import { CBA, maxContractValue, round2, seasonMoney } from "@/domain/salary";
 
 let saveId: string;
@@ -242,6 +245,119 @@ describe("live free-agency market", () => {
     // Second week keeps churning — the market doesn't freeze for the user.
     await advanceSim(s.saveId, "WEEK");
     expect(poolOf().length).toBeLessThanOrEqual(after.length);
+  }, 300_000);
+});
+
+describe("restricted free agency — offer sheets + matching rights", () => {
+  const makeUserRfa = (svId: string, userFull: string, aiTeamId: string, salary = 9, years = 3) => {
+    const db = getDb();
+    // Turn a real roster player into an expired-rookie FA on the market.
+    const p = db
+      .select()
+      .from(playersT)
+      .where(and(eq(playersT.saveId, svId), eq(playersT.teamId, userFull)))
+      .all()
+      .filter((x) => x.status === "ACTIVE")
+      .sort((a, b) => a.ratings.overall - b.ratings.overall)[0];
+    db.update(playersT)
+      .set({
+        teamId: null,
+        lastTeamId: userFull,
+        status: "FREE_AGENT",
+        contract: { type: "ROOKIE", years: [], birdRights: true, noTrade: false, option: null, signedSeason: getSave(svId)!.season - 4 },
+      })
+      .where(eq(playersT.id, p.id))
+      .run();
+    // Inject a pending offer sheet from the AI team.
+    const save = getSave(svId)!;
+    const key = `offerSheets:${save.season}`;
+    const ps = getPhaseState(svId);
+    const sheet = { id: `sheet:${p.id.split(":").pop()}`, playerId: p.id, fromTeamId: aiTeamId, salary, years, expiresOn: "2099-01-01" };
+    db.update(savesT)
+      .set({ phaseState: { ...ps, [key]: [sheet] } as never })
+      .where(eq(savesT.id, svId))
+      .run();
+    return { playerId: p.id, sheetId: sheet.id };
+  };
+
+  it("RFA status, sheet match, decline, and window expiry all resolve correctly", async () => {
+    const s = await createSave({ name: "rfa", seed: 555030 });
+    await advanceSim(s.saveId, "SEASON");
+    makeDraftPick(s.saveId, { simulateAll: true });
+    expect(getSave(s.saveId)!.phase).toBe("FREE_AGENCY");
+    const db = getDb();
+    const userFull = `${s.saveId}:${s.teamId.split(":").pop()}`;
+    const aiTeam = db.select().from(teamsT).where(eq(teamsT.saveId, s.saveId)).all().find((t) => t.id !== userFull)!;
+
+    // sanity: a rookie-contract FA with a last team IS restricted
+    const probe = { contract: { type: "ROOKIE" }, lastTeamId: userFull };
+    expect(isRestrictedFa(probe)).toBe(true);
+    expect(isRestrictedFa({ contract: { type: "VETERAN" }, lastTeamId: userFull })).toBe(false);
+    expect(isRestrictedFa({ contract: { type: "ROOKIE" }, lastTeamId: null })).toBe(false);
+
+    // 1) match → player returns on the sheet's terms
+    const a = makeUserRfa(s.saveId, userFull, aiTeam.id, 11, 4);
+    expect(listOfferSheets(s.saveId).length).toBe(1);
+    const m = respondOfferSheet(s.saveId, a.sheetId, true);
+    expect(m.matched).toBe(true);
+    const pa = db.select().from(playersT).where(eq(playersT.id, a.playerId)).get()!;
+    expect(pa.teamId).toBe(userFull);
+    expect(pa.contract.years[0].salary).toBe(11);
+    expect(pa.contract.years.length).toBe(4);
+    expect(listOfferSheets(s.saveId).length).toBe(0);
+
+    // 2) decline → player signs with the offering team
+    const b = makeUserRfa(s.saveId, userFull, aiTeam.id, 8, 3);
+    respondOfferSheet(s.saveId, b.sheetId, false);
+    const pb = db.select().from(playersT).where(eq(playersT.id, b.playerId)).get()!;
+    expect(pb.teamId).toBe(aiTeam.id);
+    expect(pb.contract.years[0].salary).toBe(8);
+
+    // 3) letting the window close forfeits — sheet finalizes to the offerer
+    const c = makeUserRfa(s.saveId, userFull, aiTeam.id, 7, 2);
+    startNewSeason(s.saveId);
+    const pc = db.select().from(playersT).where(eq(playersT.id, c.playerId)).get()!;
+    expect(pc.teamId).toBe(aiTeam.id);
+    expect(listOfferSheets(s.saveId).length).toBe(0);
+    expect(getSave(s.saveId)!.phase).toBe("REGULAR_SEASON");
+  }, 300_000);
+
+  it("poaching another team's RFA is never guaranteed — the incumbent can match", async () => {
+    const s = await createSave({ name: "rfa poach", seed: 555031 });
+    await advanceSim(s.saveId, "SEASON");
+    makeDraftPick(s.saveId, { simulateAll: true });
+    const db = getDb();
+    const userFull = `${s.saveId}:${s.teamId.split(":").pop()}`;
+    // An AI team's expired rookie hits the market restricted.
+    const aiTeam = db.select().from(teamsT).where(eq(teamsT.saveId, s.saveId)).all().find((t) => t.id !== userFull)!;
+    // Cheapest AI player → asking price is affordable even over the cap (MLE),
+    // so the offer actually reaches the matching-rights check.
+    const p = db
+      .select()
+      .from(playersT)
+      .where(and(eq(playersT.saveId, s.saveId), eq(playersT.teamId, aiTeam.id)))
+      .all()
+      .sort((a, b) => a.ratings.overall - b.ratings.overall)[0];
+    db.update(playersT)
+      .set({
+        teamId: null,
+        lastTeamId: aiTeam.id,
+        status: "FREE_AGENT",
+        contract: { type: "ROOKIE", years: [], birdRights: true, noTrade: false, option: null, signedSeason: getSave(s.saveId)!.season - 4 },
+      })
+      .where(eq(playersT.id, p.id))
+      .run();
+    const ask = askingSalaryFor(p.contract, p.yearsPro, p.ratings.overall, p.age, getSave(s.saveId)!.season);
+    const r = submitFaOffer(s.saveId, p.id.split(":").pop()!, 3, ask);
+    const after = db.select().from(playersT).where(eq(playersT.id, p.id)).get()!;
+    // Either the offer was matched (he re-signed with the AI incumbent) or he
+    // actually joined us — but he can NEVER be signed around the match right.
+    if (!r.accepted) {
+      expect(r.reason).toContain("母队");
+      expect(after.teamId).toBe(aiTeam.id);
+    } else {
+      expect(after.teamId).toBe(userFull);
+    }
   }, 300_000);
 });
 
