@@ -23,6 +23,7 @@ export interface LeaguePlayer {
   name: string;
   teamId: string | null;
   position: string;
+  secondPosition?: string | null;
   age: number;
   yearsPro: number;
   tenure: number;
@@ -273,6 +274,7 @@ function toSimPlayer(p: LeaguePlayer): SimPlayer {
     id: p.id,
     name: p.name,
     position: p.position as SimPlayer["position"],
+    secondPosition: (p.secondPosition ?? null) as SimPlayer["secondPosition"],
     ratings: {
       overall: p.ratings.overall,
       inside: p.ratings.inside,

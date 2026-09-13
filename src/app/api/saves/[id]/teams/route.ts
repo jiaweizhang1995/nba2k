@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import { teams as teamsT, players as playersT, draftPicks as picksT } from "@/db/schema";
-import { getSave } from "@/server/engine";
+import { getSave, deadCapHit } from "@/server/engine";
 import { capSnapshot } from "@/domain/salary";
 import { handleError, ok, fail } from "@/server/api-helpers";
 
@@ -16,7 +16,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
     const out = teamRows.map((t) => {
       const roster = db.select().from(playersT).where(and(eq(playersT.saveId, id), eq(playersT.teamId, t.id))).all();
       const picks = db.select().from(picksT).where(and(eq(picksT.saveId, id), eq(picksT.holderTeamId, t.id), eq(picksT.year, save.season + 1))).all();
-      const snap = capSnapshot(roster, roster.length);
+      const snap = capSnapshot(roster, roster.length, deadCapHit(id, t.id.split(":").slice(1).join(":")));
       return {
         id: t.id.split(":").slice(1).join(":"),
         abbr: t.abbr,

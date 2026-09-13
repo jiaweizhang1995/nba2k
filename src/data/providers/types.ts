@@ -16,7 +16,8 @@ export interface ProvenanceMeta {
 export interface ImportedPlayerRecord {
   externalId: string;
   name: string;
-  position: string; // PG/SG/SF/PF/C
+  position: string; // PG/SG/SF/PF/C, or a raw provider token (G/GF/F/FC…) resolved at import
+  secondPosition?: string | null; // optional explicit secondary slot; inferred when absent
   teamAbbr?: string; // maps the player to an imported team (by abbr)
   age: number;
   heightCm: number | null;

@@ -5,6 +5,7 @@
 // Deterministic given (seed, salt): same inputs → identical box scores.
 
 import { rngFor, PRNG } from "../rng";
+import { assignStarters } from "../positions";
 import type { BoxPlayerLine, BoxScoreJson, Position } from "../types";
 
 export const GAME_SIM_VERSION = "GAME-SIM v2.0";
@@ -13,6 +14,7 @@ export interface SimPlayer {
   id: string;
   name: string;
   position: Position;
+  secondPosition?: Position | null;
   ratings: {
     overall: number;
     inside: number;
@@ -65,8 +67,6 @@ const ROLE_BASE_MINUTES: Record<string, number> = {
   STASH: 0,
 };
 
-const ROLE_RANK: Record<string, number> = { STAR: 0, STARTER: 1, SIXTH_MAN: 2, ROTATION: 3, BENCH: 4, STASH: 5 };
-
 const QUARTER_SECONDS = 12 * 60;
 const OT_SECONDS = 5 * 60;
 const MIN = 48 * 5; // 240 player-minutes per team per game
@@ -91,9 +91,10 @@ export function buildRotation(team: SimTeam, rng: PRNG, opts: BuildRotationOpts 
     if (uniq.size === 5 && cfg.starters.every((id) => avail.some((p) => p.id === id))) starterIds = cfg.starters;
   }
   if (!starterIds) {
-    starterIds = [...avail]
-      .sort((a, b) => (ROLE_RANK[a.role] ?? 3) - (ROLE_RANK[b.role] ?? 3) || b.ratings.overall - a.ratings.overall)
-      .slice(0, 5)
+    // No manager config: fill the five lineup slots (PG→C) — scarcest eligible
+    // position first, natural position preferred over flex, best overall wins.
+    starterIds = assignStarters(avail)
+      .filter((p): p is SimPlayer => !!p)
       .map((p) => p.id);
   }
   const starterSet = new Set(starterIds);

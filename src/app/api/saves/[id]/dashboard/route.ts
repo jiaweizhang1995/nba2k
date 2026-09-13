@@ -1,8 +1,9 @@
 import { and, eq, or, asc } from "drizzle-orm";
 import { getDb } from "@/db";
 import { teams as teamsT, players as playersT, games as gamesT, saves as savesT } from "@/db/schema";
-import { getPhaseState, getChemistry } from "@/server/engine";
+import { getPhaseState, getChemistry, deadCapHit } from "@/server/engine";
 import { CBA, capSnapshot } from "@/domain/salary";
+import { assignStarters, placeIntoSlots } from "@/domain/positions";
 import { handleError, ok, fail } from "@/server/api-helpers";
 
 const shortId = (full: string) => full.split(":").slice(1).join(":");
@@ -116,49 +117,56 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
     // ---- Injuries & fatigue ----
     const starterIds = new Set(((ps.rotation as Record<string, { starters?: string[] }> | undefined)?.[teamShort]?.starters ?? []) as string[]);
     const roleRank: Record<string, number> = { STAR: 0, STARTER: 1, SIXTH_MAN: 2, ROTATION: 3, BENCH: 4, STASH: 5 };
-    const depthOrder = [...active].sort((a, b) => b.ratings.overall - a.ratings.overall || (roleRank[a.role] ?? 3) - (roleRank[b.role] ?? 3));
-    const autoStarters = depthOrder.slice(0, 5);
-    const effectiveStarters = starterIds.size === 5 ? active.filter((p) => starterIds.has(shortId(p.id))) : autoStarters;
-    const starterIdSet = new Set(effectiveStarters.map((p) => shortId(p.id)));
+    // Everything below works on short player ids (matching saved rotation keys).
+    const activeShort = active.map((p) => ({ ...p, id: shortId(p.id) }));
+    const depthOrder = [...activeShort].sort((a, b) => b.ratings.overall - a.ratings.overall || (roleRank[a.role] ?? 3) - (roleRank[b.role] ?? 3));
+    // Slot view of the five starters: saved config maps by best fit, otherwise
+    // the engine's position-aware default (same helper the sim uses).
+    const avail = activeShort.filter((p) => !p.injury || p.injury.weeksRemaining <= 0);
+    const effectiveStarters =
+      starterIds.size === 5
+        ? placeIntoSlots(activeShort, [...starterIds]).filter((p): p is (typeof activeShort)[number] => !!p)
+        : assignStarters(avail).filter((p): p is (typeof activeShort)[number] => !!p);
+    const starterIdSet = new Set(effectiveStarters.map((p) => p.id));
 
-    const injuries = active
+    const injuries = activeShort
       .filter((p) => p.injury && p.injury.weeksRemaining > 0)
       .map((p) => ({
-        playerId: shortId(p.id),
+        playerId: p.id,
         name: p.name,
         position: p.position,
         overall: p.ratings.overall,
         description: p.injury!.description,
         weeks: Math.max(0, Math.round(p.injury!.weeksRemaining * 7)),
         severity: p.injury!.severity,
-        isStarter: starterIdSet.has(shortId(p.id)),
+        isStarter: starterIdSet.has(p.id),
       }))
       .sort((a, b) => Number(b.isStarter) - Number(a.isStarter) || a.weeks - b.weeks);
 
-    const fatigue = active
+    const fatigue = activeShort
       .filter((p) => p.stamina < 0.75)
-      .map((p) => ({ playerId: shortId(p.id), name: p.name, stamina: Math.round(p.stamina * 100), isStarter: starterIdSet.has(shortId(p.id)) }))
+      .map((p) => ({ playerId: p.id, name: p.name, stamina: Math.round(p.stamina * 100), isStarter: starterIdSet.has(p.id) }))
       .sort((a, b) => a.stamina - b.stamina)
       .slice(0, 6);
 
     // ---- Rotation summary ----
-    const pLine = (p: (typeof roster)[number]) => ({
-      id: shortId(p.id),
+    const pLine = (p: (typeof activeShort)[number]) => ({
+      id: p.id,
       name: p.name,
       position: p.position,
       overall: p.ratings.overall,
-      minutes: (ps.rotation as Record<string, { minutes?: Record<string, number> }> | undefined)?.[teamShort]?.minutes?.[shortId(p.id)] ?? null,
+      minutes: (ps.rotation as Record<string, { minutes?: Record<string, number> }> | undefined)?.[teamShort]?.minutes?.[p.id] ?? null,
       stamina: Math.round(p.stamina * 100),
       injured: !!(p.injury && p.injury.weeksRemaining > 0),
     });
     const rotation = {
       configured: starterIds.size === 5,
       starters: effectiveStarters.map(pLine),
-      benchTop: depthOrder.filter((p) => !starterIdSet.has(shortId(p.id))).slice(0, 4).map(pLine),
+      benchTop: depthOrder.filter((p) => !starterIdSet.has(p.id)).slice(0, 4).map(pLine),
     };
 
     // ---- Cap / tax ----
-    const cap = capSnapshot(active, active.length);
+    const cap = capSnapshot(active, active.length, deadCapHit(id, teamShort));
 
     // ---- Chemistry → basketball conclusions (3 weakest factors) ----
     const chem = getChemistry(id, teamShort);
@@ -195,7 +203,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
         actionHref: "/trade",
       });
     }
-    const benchPlayers = depthOrder.filter((p) => !starterIdSet.has(shortId(p.id)));
+    const benchPlayers = depthOrder.filter((p) => !starterIdSet.has(p.id));
     const benchCreator = Math.max(0, ...benchPlayers.map((p) => p.ratings.playmaking));
     if (benchPlayers.length > 0 && benchCreator < 62) {
       advisors.push({

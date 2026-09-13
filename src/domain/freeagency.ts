@@ -31,8 +31,8 @@ export interface FaEvaluation {
 }
 
 /** Does the team have room or an exception to pay this? */
-export function canAfford(team: TradeTeam, avgSalary: number, rosterAfter: number): { ok: boolean; reason: string } {
-  const snap = capSnapshot(team.players.map((p) => ({ contract: p.contract })), rosterAfter);
+export function canAfford(team: TradeTeam, avgSalary: number, rosterAfter: number, deadMoney = 0): { ok: boolean; reason: string } {
+  const snap = capSnapshot(team.players.map((p) => ({ contract: p.contract })), rosterAfter, deadMoney);
   if (rosterAfter > CBA.maxRosterSize) return { ok: false, reason: `签约后人数超过上限 ${CBA.maxRosterSize}` };
   if (!snap.overCap) {
     if (avgSalary <= snap.capSpace) return { ok: true, reason: "使用薪资空间" };

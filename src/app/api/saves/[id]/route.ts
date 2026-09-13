@@ -2,7 +2,7 @@ import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "@/db";
 import { teams as teamsT, players as playersT, saves as savesT } from "@/db/schema";
-import { deleteSave, getSave, getChemistry, getPhaseState, logEvent } from "@/server/engine";
+import { deleteSave, getSave, getChemistry, getPhaseState, logEvent, deadCapHit } from "@/server/engine";
 import { capSnapshot } from "@/domain/salary";
 import { handleError, ok, fail } from "@/server/api-helpers";
 
@@ -42,9 +42,11 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
     const userTeam = rawTeam ? { ...rawTeam, id: rawTeam.id.split(":").slice(1).join(":") } : null;
     const roster = shortTeamId ? db.select().from(playersT).where(and(eq(playersT.saveId, id), eq(playersT.teamId, `${id}:${shortTeamId}`))).all() : [];
     const chemistry = shortTeamId ? getChemistry(id, shortTeamId) : null;
+    const deadMoney = shortTeamId ? deadCapHit(id, shortTeamId) : 0;
     const cap = capSnapshot(
       roster,
       roster.filter((p) => p.status === "ACTIVE" || p.status === "INJURED").length,
+      deadMoney,
     );
     const { CBA_VERSION, CBA } = await import("@/domain/salary");
     const ratingVersion = save.ratingVersion;

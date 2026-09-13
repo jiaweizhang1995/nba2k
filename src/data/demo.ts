@@ -10,6 +10,7 @@
 
 import { rngFor } from "@/domain/rng";
 import { computeRatings, RATING_VERSION } from "@/domain/ratings";
+import { resolvePositions } from "@/domain/positions";
 import type { Contract, PlayerRatings, Position, SeasonStatLine, TeamPhase } from "@/domain/types";
 
 export const DEMO_PROVIDER = "DEMO";
@@ -284,7 +285,7 @@ export function generateDemoLeague(seed: number, season: number): { teams: DemoT
         name: nextName(),
         teamId: null,
         position: pos,
-        secondPosition: null,
+        secondPosition: rng.chance(0.4) ? resolvePositions(pos).secondPosition : null,
         age,
         heightCm: rng.int(hMin, hMax),
         weightKg: rng.int(wMin, wMax),

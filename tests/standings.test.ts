@@ -54,24 +54,24 @@ describe("Regular season progression", () => {
     // season label rolled over
     expect(saveAfterPo.season).toBe(saveAfterReg.season + 1);
 
-    // draft order exists; the real-data save ships without a scout-rated
-    // draft class (documented boundary), so the board is empty until a
-    // prospect class is imported via the data pipeline.
+    // draft order exists and a deterministic 60-man synthetic class is
+    // generated for the new season (real-data saves ship without prospects,
+    // so the engine creates one — otherwise the draft acquires nobody).
     const order = getDraftOrder(saveId);
     expect(order).toHaveLength(60);
     const board = getDraftBoard(saveId);
-    expect(board).toHaveLength(0);
+    expect(board).toHaveLength(60);
+    expect(board.every((p) => p.scouting.floor <= p.scouting.ceiling)).toBe(true);
   }, 300_000);
 
   it("draft completes → free agency → new season starts with fresh schedule", async () => {
     const ps = getPhaseState(saveId);
     const userTeamId = (ps.userTeamId as string).split(":").pop()!;
-    // No prospects in the class: all 60 slots are exercised as skipped picks
-    // (prospect = null) and the draft still completes — never fabricates
-    // players, never blocks the offseason loop.
+    // A 60-prospect class was generated at draft entry, so every slot
+    // resolves to a real rookie instead of a skipped pick.
     const picked = makeDraftPick(saveId, { simulateAll: true });
     expect(picked.length).toBe(60);
-    expect(picked.every((p) => p.prospect === null)).toBe(true);
+    expect(picked.every((p) => p.prospect !== null)).toBe(true);
 
     const saveAfterDraft = getSave(saveId)!;
     expect(saveAfterDraft.phase).toBe("FREE_AGENCY");

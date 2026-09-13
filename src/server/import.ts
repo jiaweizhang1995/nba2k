@@ -18,6 +18,7 @@ import {
   awards as awardsT,
 } from "@/db/schema";
 import { blendWithMarketEstimate, computeRatings, computeRatingsFromPerGame, estimateRatingsFromSalary, RATING_VERSION, RATING_VERSION_V13 } from "@/domain/ratings";
+import { resolvePositions, type LineupPos } from "@/domain/positions";
 import { createSchedule, type LeagueState } from "@/domain/sim/season";
 import { hashSeed } from "@/domain/rng";
 import type { SeasonStatLine } from "@/domain/types";
@@ -153,13 +154,14 @@ export async function importData(saveId: string, payload: ImportPayload): Promis
         ftm: p.statLine.ftm ?? 0,
         fta: p.statLine.fta ?? 0,
       };
-      const position = (["PG", "SG", "SF", "PF", "C"].includes(p.position) ? p.position : "SF") as
-        | "PG"
-        | "SG"
-        | "SF"
-        | "PF"
-        | "C";
+      // Raw provider tokens (G/GF/F/FC…) resolve to primary + secondary slots
+      // using assists/height as tie-breakers; explicit 5-slot values pass
+      // through. An explicit secondPosition in the payload always wins.
       const perGame = p.perGame ?? null;
+      const apg = perGame?.apg ?? (statLine.g > 0 ? statLine.ast / statLine.g : null);
+      const resolved = resolvePositions(p.position, { apg, heightCm: p.heightCm });
+      const position: LineupPos = resolved.position;
+      const secondPosition: LineupPos | null = (p.secondPosition as LineupPos | null | undefined) ?? resolved.secondPosition;
       let ratings = perGame
         ? computeRatingsFromPerGame(perGame, position, p.age || 25, {
             potential: p.potential,
@@ -201,7 +203,7 @@ export async function importData(saveId: string, payload: ImportPayload): Promis
           name: p.name,
           teamId: teamFullId,
           position,
-          secondPosition: null,
+          secondPosition,
           age: p.age || 25,
           heightCm: p.heightCm ?? 200,
           weightKg: p.weightKg ?? 100,

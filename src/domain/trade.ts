@@ -37,6 +37,8 @@ export interface TradeTeam {
   picks: TradePick[];
   aiPhase: TeamPhase;
   aiRisk: number;
+  /** Dead cap from waived players (current-season hit), counts toward cap status. */
+  deadMoney?: number;
 }
 
 export interface Valuation {
@@ -225,7 +227,7 @@ export function validateTrade(proposal: TradeProposal, teams: TradeTeam[], seaso
     // Salary matching
     const outgoing = givePlayers.reduce((a, p) => a + salaryForSeason(p.contract, 0), 0);
     const incoming = recvPlayers.reduce((a, p) => a + salaryForSeason(p.contract, 0), 0);
-    const snap = capSnapshot(team.players.map((p) => ({ contract: p.contract })), team.players.length);
+    const snap = capSnapshot(team.players.map((p) => ({ contract: p.contract })), team.players.length, team.deadMoney ?? 0);
     const check = salaryMatching(outgoing, incoming, snap);
     salaryCheck.push({ partyTeamId: team.id, incoming: round2(incoming), outgoing: round2(outgoing), band: check.band, ok: check.ok });
     if (!check.ok) {
@@ -419,7 +421,7 @@ export function generateTradeOffers(
 
   for (const team of teams) {
     if (team.id === userTeamId) continue;
-    const snap = capSnapshot(team.players.map((p) => ({ contract: p.contract })), team.players.length);
+    const snap = capSnapshot(team.players.map((p) => ({ contract: p.contract })), team.players.length, team.deadMoney ?? 0);
     const minOut = minSalaryOut(salaryRecv, snap);
 
     const phaseTol = team.aiPhase === "CONTENDER" ? -1 : team.aiPhase === "PLAYOFF" ? 0 : team.aiPhase === "BUBBLE" ? 2 : 4;

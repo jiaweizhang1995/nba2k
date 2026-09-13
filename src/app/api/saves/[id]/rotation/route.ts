@@ -28,6 +28,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
         id: shortId(p.id),
         name: p.name,
         position: p.position,
+        secondPosition: p.secondPosition,
         overall: p.ratings.overall,
         role: p.role,
         status: p.status,

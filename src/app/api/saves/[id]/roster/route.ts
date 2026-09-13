@@ -1,8 +1,14 @@
 import { and, eq } from "drizzle-orm";
+import { z } from "zod";
 import { getDb } from "@/db";
 import { players as playersT, teams as teamsT } from "@/db/schema";
-import { getSave } from "@/server/engine";
+import { getSave, waivePlayer } from "@/server/engine";
 import { handleError, ok, fail } from "@/server/api-helpers";
+
+const rosterActionSchema = z.object({
+  action: z.literal("waive"),
+  playerId: z.string().min(1),
+});
 
 /** Roster / player list with full provenance + explainable ratings. */
 export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }) {
@@ -52,6 +58,22 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
       source: p.source,
     }));
     return ok({ players, season: save.season });
+  } catch (e) {
+    return handleError(e);
+  }
+}
+
+/**
+ * POST { action: "waive", playerId } — release a player. Remaining guaranteed
+ * salary becomes dead money that still counts against the cap.
+ */
+export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
+  try {
+    const { id } = await ctx.params;
+    const body = rosterActionSchema.safeParse(await req.json());
+    if (!body.success) return fail("BAD_INPUT", "需要 { action: 'waive', playerId }", 400);
+    const result = waivePlayer(id, body.data.playerId);
+    return ok(result);
   } catch (e) {
     return handleError(e);
   }

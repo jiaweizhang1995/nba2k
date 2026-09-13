@@ -155,3 +155,108 @@ export function prospectRookieContract(pickNumber: number, round: number, season
   const option = round === 1 ? ("TO" as const) : null;
   return { type: "ROOKIE" as const, years, birdRights: false, noTrade: false, option, signedSeason: season };
 }
+
+// ---------------------------------------------------------------------------
+// Synthetic draft class generation
+// ---------------------------------------------------------------------------
+// Real-data saves ship without prospects, so the draft would be meaningless.
+// We generate a deterministic class per season from (saveSeed, season).
+
+const PROSPECT_FIRST = [
+  "Jalen", "Marcus", "Trey", "DeShawn", "Malik", "Andre", "Kobe", "Tyrese", "Jaden", "Cameron",
+  "Isaiah", "Devin", "Zion", "Caleb", "Micah", "Darius", "Jaylen", "Terrence", "Xavier", "Brice",
+  "Nikola", "Luka", "Paolo", "Victor", "Alperen", "Deni", "Franz", "Moritz", "Jakob", "Domantas",
+];
+const PROSPECT_LAST = [
+  "Carter", "Jennings", "Whitmore", "Boone", "Ellison", "Marsh", "Vance", "Okoye", "Petrov", "Soric",
+  "Dubois", "Moreau", "Kowalski", "Lindqvist", "Fernandez", "Silva", "Adeyemi", "Tanaka", "Rossi", "Muller",
+  "Hawkins", "Beasley", "Crawford", "Dorsey", "Emerson", "Faulkner", "Griggs", "Holloway", "Irwin", "Jeffers",
+];
+const CLASS_POSITIONS = ["PG", "SG", "SF", "PF", "C"] as const;
+const CLASS_HEIGHT: Record<(typeof CLASS_POSITIONS)[number], [number, number]> = { PG: [183, 196], SG: [191, 201], SF: [196, 208], PF: [203, 213], C: [208, 221] };
+const CLASS_WEIGHT: Record<(typeof CLASS_POSITIONS)[number], [number, number]> = { PG: [79, 93], SG: [86, 100], SF: [93, 109], PF: [100, 118], C: [107, 125] };
+
+export interface ProspectSeed {
+  name: string;
+  position: (typeof CLASS_POSITIONS)[number];
+  secondPosition: (typeof CLASS_POSITIONS)[number] | null;
+  age: number;
+  heightCm: number;
+  weightKg: number;
+  draftYear: number;
+  ratings: {
+    overall: number;
+    inside: number;
+    finishing: number;
+    shooting: number;
+    threePoint: number;
+    freeThrow: number;
+    playmaking: number;
+    rebounding: number;
+    perimeterD: number;
+    interiorD: number;
+    usageTendency: number;
+    potential: number | null;
+    potentialLow: number | null;
+    potentialHigh: number | null;
+    confidence: number;
+    ratingVersion: string;
+  };
+}
+
+/**
+ * Deterministic draft class for a season. Talent is top-heavy like a real
+ * class: a few blue-chippers, a first-round tier, then long-tail depth.
+ */
+export function generateDraftClass(seed: number, season: number, count = 60): ProspectSeed[] {
+  const rng = rngFor(seed, `draft-class:${season}`);
+  const used = new Set<string>();
+  const prospects: ProspectSeed[] = [];
+
+  // Pre-roll class quality so a season can be strong or weak overall.
+  const classStrength = rng.float(0.85, 1.15);
+
+  for (let i = 0; i < count; i++) {
+    let name = `${PROSPECT_FIRST[rng.int(0, PROSPECT_FIRST.length - 1)]} ${PROSPECT_LAST[rng.int(0, PROSPECT_LAST.length - 1)]}`;
+    while (used.has(name)) name = `${PROSPECT_FIRST[rng.int(0, PROSPECT_FIRST.length - 1)]} ${PROSPECT_LAST[rng.int(0, PROSPECT_LAST.length - 1)]}`;
+    used.add(name);
+
+    const position = CLASS_POSITIONS[i % CLASS_POSITIONS.length];
+    const tier = rng.next();
+    const overall = Math.round(
+      (tier < 0.08 ? rng.int(70, 75) : tier < 0.3 ? rng.int(63, 69) : tier < 0.65 ? rng.int(56, 62) : rng.int(48, 55)) * classStrength,
+    );
+    const age = tier < 0.4 ? rng.int(19, 20) : rng.int(19, 22);
+    const potential = Math.min(98, overall + rng.int(4, age <= 20 ? 20 : 12));
+    const [h0, h1] = CLASS_HEIGHT[position];
+    const [w0, w1] = CLASS_WEIGHT[position];
+    const heightCm = rng.int(h0, h1);
+    const weightKg = rng.int(w0, w1);
+
+    const bias = (b: number) => Math.max(30, Math.min(95, overall + b + rng.int(-8, 8)));
+    const isBig = position === "PF" || position === "C";
+    const isGuard = position === "PG" || position === "SG";
+    const ratings: ProspectSeed["ratings"] = {
+      overall,
+      inside: bias(isBig ? 8 : -6),
+      finishing: bias(isGuard ? 4 : 0),
+      shooting: bias(isGuard ? 6 : -4),
+      threePoint: bias(position === "PG" ? 4 : position === "SG" ? 8 : isBig ? -10 : 0),
+      freeThrow: bias(isGuard ? 8 : isBig ? -6 : 0),
+      playmaking: bias(position === "PG" ? 12 : isBig ? -8 : 0),
+      rebounding: bias(isBig ? 10 : -6),
+      perimeterD: bias(isGuard ? 6 : -4),
+      interiorD: bias(position === "C" ? 12 : position === "PF" ? 6 : -8),
+      usageTendency: round2(rng.float(0.15, 0.45)),
+      potential,
+      potentialLow: Math.max(overall + 1, potential - rng.int(4, 12)),
+      potentialHigh: Math.min(98, potential + rng.int(2, 8)),
+      confidence: round2(rng.float(0.25, 0.5)),
+      ratingVersion: "synthetic-class-v1",
+    };
+
+    const secondPosition = rng.next() < 0.3 ? CLASS_POSITIONS[rng.int(0, 4)] : null;
+    prospects.push({ name, position, secondPosition, age, heightCm, weightKg, draftYear: season, ratings });
+  }
+  return prospects;
+}

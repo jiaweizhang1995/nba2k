@@ -27,12 +27,12 @@ import { loadRealPayload } from "@/data/real";
 import { importData } from "./import";
 import { RATING_VERSION } from "@/domain/ratings";
 import { createSchedule, advanceDay, applyDevelopment, seasonScore, type LeagueState, type LeaguePlayer, type LeagueTeam, type LeagueGame } from "@/domain/sim/season";
-import { CBA, CBA_VERSION, capSnapshot } from "@/domain/salary";
+import { CBA, CBA_VERSION, capSnapshot, round2 } from "@/domain/salary";
 import { validateTrade, generateTradeOffers, TRADE_RULES_VERSION, aiEvaluateTrade, type TradeTeam, type TradePlayer, type TradePick } from "@/domain/trade";
 import { computeChemistry, CHEMISTRY_VERSION } from "@/domain/chemistry";
-import { runLottery, aiDraftPick, prospectRookieContract, generateScoutingReport, registerProspectRatings, type DraftProspect } from "@/domain/draft";
+import { runLottery, aiDraftPick, prospectRookieContract, generateScoutingReport, registerProspectRatings, generateDraftClass, type DraftProspect } from "@/domain/draft";
 import { hashSeed, rngFor } from "@/domain/rng";
-import { canAfford, evaluateOffer, aiCompetitionLevel } from "@/domain/freeagency";
+import { canAfford, evaluateOffer, aiCompetitionLevel, suggestedContract } from "@/domain/freeagency";
 import { classifyTeamPhase } from "@/domain/aiGm";
 import type { SeasonPhase, TradeParty, DevelopmentState } from "@/domain/types";
 
@@ -367,6 +367,7 @@ export function loadLeagueState(saveId: string, opts: { includeGames?: boolean }
     name: p.name,
     teamId: p.teamId ? strip(p.teamId) : null,
     position: p.position,
+    secondPosition: p.secondPosition,
     age: p.age,
     yearsPro: p.yearsPro,
     tenure: p.tenure,
@@ -635,15 +636,12 @@ export function advanceSim(saveId: string, mode: AdvanceMode): AdvanceResult {
     result.fatigueChanges!.sort((a, b) => a.to - b.to);
   }
 
-  // Playoffs may have crowned a champion within the loop.
-  let champion: string | null = null;
-  if (startPhase === "PLAYOFFS" && state.phase === "OFFSEASON") {
-    // champion recorded via notes; find from games
-    champion = findChampion(state);
-  }
+  // Playoffs may have crowned a champion within the loop — check on every
+  // transition into OFFSEASON, not only when the run started in PLAYOFFS.
+  const enteringOffseason = startPhase !== "OFFSEASON" && state.phase === "OFFSEASON";
+  const champion = enteringOffseason ? findChampion(state) : null;
   result.champion = champion;
 
-  const enteringOffseason = startPhase !== "OFFSEASON" && state.phase === "OFFSEASON";
   if (enteringOffseason) {
     result.awards = recordAwards(state, champion);
     prepareDraft(state, result);
@@ -756,7 +754,73 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
   state.currentDate = `${newSeason - 1}-06-25`;
 
   persistDraftOrder(state.saveId, draftOrder, lotteryResult, worst14);
-  logEvent(state.saveId, "DRAFT", `选秀大会准备就绪：乐透抽签完成（${state.season} 届）`, { lottery: round1.slice(0, 5) });
+  const generated = ensureDraftClass(state.saveId, state.seed, newSeason);
+  if (generated > 0) result.notes.push(`已生成 ${generated} 人新秀池`);
+  logEvent(state.saveId, "DRAFT", `选秀大会准备就绪：乐透抽签完成（${state.season} 届）`, { lottery: round1.slice(0, 5), prospects: generated });
+}
+
+/**
+ * Ensure a scoutable draft class exists for the season. Real-data saves ship
+ * without prospects — generate a deterministic 60-man class so the draft
+ * actually acquires players instead of recording 60 skipped picks.
+ */
+function ensureDraftClass(saveId: string, seed: number, season: number): number {
+  const db = getDb();
+  const existing = db
+    .select({ id: playersT.id })
+    .from(playersT)
+    .where(and(eq(playersT.saveId, saveId), eq(playersT.status, "PROSPECT"), eq(playersT.draftYear, season)))
+    .all();
+  if (existing.length > 0) return 0;
+
+  const prospects = generateDraftClass(seed, season);
+  const src = {
+    provider: "GENERATED",
+    sourceUrl: null,
+    retrievedAt: null,
+    season: null,
+    licenseNote: DEMO_LICENSE,
+    status: "DEMO" as const,
+    ratingVersion: RATING_VERSION,
+  };
+  db.transaction((tx) => {
+    prospects.forEach((p, i) => {
+      const rowId = `${saveId}:pros-${season}-${i + 1}`;
+      tx.insert(playersT)
+        .values({
+          id: rowId,
+          saveId,
+          name: p.name,
+          teamId: null,
+          position: p.position,
+          secondPosition: p.secondPosition,
+          age: p.age,
+          heightCm: p.heightCm,
+          weightKg: p.weightKg,
+          draftYear: season,
+          draftRound: null,
+          draftPick: null,
+          yearsPro: 0,
+          ratings: p.ratings,
+          seasonStats: [],
+          careerStats: [],
+          contract: { type: "ROOKIE", years: [], birdRights: false, noTrade: false, option: null, signedSeason: season },
+          status: "PROSPECT",
+          role: "BENCH",
+          satisfaction: 70,
+          injury: null,
+          development: { trajectory: "GROWING", growthLeft: Math.max(0, (p.ratings.potential ?? p.ratings.overall) - p.ratings.overall), lastDelta: 0 },
+          tenure: 0,
+          stamina: 1,
+          lastGameDate: null,
+          baselineStats: null,
+          source: src,
+        })
+        .run();
+      registerProspectRatings(rowId, p.ratings);
+    });
+  });
+  return prospects.length;
 }
 
 function persistDraftOrder(saveId: string, order: { pickNumber: number; round: number; holderTeamId: string }[], lottery: string[], worst14: string[]) {
@@ -840,6 +904,7 @@ function toTradeTeam(saveId: string, teamId: string): TradeTeam {
     picks: tk,
     aiPhase: team.aiPhase as TradeTeam["aiPhase"],
     aiRisk: team.aiRisk,
+    deadMoney: deadCapHit(saveId, teamId),
   };
 }
 
@@ -1020,6 +1085,9 @@ export function getDraftBoard(saveId: string) {
   const db = getDb();
   const save = getSave(saveId);
   if (!save) throw new EngineError("NO_SAVE", "存档不存在");
+  // Self-heal saves that entered the draft before classes were generated
+  // (e.g. the 5-year playthrough save): materialize the class lazily.
+  if (save.phase === "DRAFT") ensureDraftClass(saveId, save.seed, save.season);
   const prospects = db.select().from(playersT).where(and(eq(playersT.saveId, saveId), eq(playersT.status, "PROSPECT"), eq(playersT.draftYear, save.season))).all();
   return prospects.map((p) => ({
     id: p.id.split(":").slice(1).join(":"),
@@ -1046,6 +1114,7 @@ export function makeDraftPick(saveId: string, opts: { prospectId?: string; simul
   const save = getSave(saveId);
   if (!save) throw new EngineError("NO_SAVE", "存档不存在");
   if (save.phase !== "DRAFT") throw new EngineError("WRONG_PHASE", "当前不在选秀阶段");
+  ensureDraftClass(saveId, save.seed, save.season);
   const order = getDraftOrder(saveId);
   const donePicks = db.select().from(picksT).where(and(eq(picksT.saveId, saveId), eq(picksT.year, save.season), eq(picksT.status, "EXERCISED"))).all();
   const doneCount = donePicks.length;
@@ -1147,9 +1216,12 @@ export function startFreeAgency(saveId: string) {
         tx.update(playersT).set({ status: "FREE_AGENT", teamId: null }).where(eq(playersT.id, p.id)).run();
       }
     }
-    // AI teams fill rosters to the league minimum with cheap FA signings.
-    // The pool is re-queried every iteration (a stale in-memory array would
-    // loop forever signing the same player).
+    // Teams below the league minimum roster size get filler-tier signings only
+    // (low-overall players on minimum deals). Quality free agents stay in the
+    // pool so the user gets a real market window; AI market-rate signings run
+    // in startNewSeason once that window closes. The pool is re-queried every
+    // iteration (a stale in-memory array would loop forever on one player).
+    const FILLER_MAX_OVERALL = 72;
     const teams = tx.select().from(teamsT).where(eq(teamsT.saveId, saveId)).all();
     for (const t of teams) {
       for (;;) {
@@ -1160,7 +1232,7 @@ export function startFreeAgency(saveId: string) {
           .from(playersT)
           .where(and(eq(playersT.saveId, saveId), eq(playersT.status, "FREE_AGENT")))
           .all()
-          .filter((p) => p.teamId === null);
+          .filter((p) => p.teamId === null && p.ratings.overall < FILLER_MAX_OVERALL);
         if (!pool.length) break;
         const pick = pool.sort((a, b) => b.ratings.overall - a.ratings.overall)[0];
         tx.update(playersT)
@@ -1213,6 +1285,80 @@ export function startNewSeason(saveId: string) {
     // reset team records
     tx.update(teamsT).set({ wins: 0, losses: 0 }).where(eq(teamsT.saveId, saveId)).run();
 
+    // AI roster completion: once the user's free-agency window closes, AI
+    // teams fill up to the target roster size at honest market value — cap
+    // space first, then the mid-level, and only low-tier players take the
+    // minimum. Stars that nobody can afford stay unsigned instead of being
+    // sniped for 1.2M. 15-man rosters also keep the trade market fluid.
+    const AI_ROSTER_TARGET = 15;
+    const MLE = 12.8;
+    const APRON_FILLER_MAX = 74; // above the second apron only low-tier players take the minimum
+    const userTeamFullId = ((save.phaseState as Record<string, unknown> | null)?.userTeamId as string | undefined) ?? null;
+    const aiTeams = tx.select().from(teamsT).where(eq(teamsT.saveId, saveId)).all().filter((t) => t.id !== userTeamFullId);
+    let aiSigned = 0;
+    for (const t of aiTeams) {
+      for (;;) {
+        const roster = tx.select().from(playersT).where(and(eq(playersT.saveId, saveId), eq(playersT.teamId, t.id))).all();
+        if (roster.length >= AI_ROSTER_TARGET) break;
+        const pool = tx
+          .select()
+          .from(playersT)
+          .where(and(eq(playersT.saveId, saveId), eq(playersT.status, "FREE_AGENT")))
+          .all()
+          .filter((p) => p.teamId === null)
+          .sort((a, b) => b.ratings.overall - a.ratings.overall);
+        if (!pool.length) break;
+        const snap = capSnapshot(roster, roster.length);
+        let signed = false;
+        for (const c of pool) {
+          const asking = Math.max(CBA.minimumSalary, (c.contract.years[0]?.salary ?? 5) * 1.05);
+          const offer = suggestedContract(
+            {
+              id: c.id,
+              name: c.name,
+              position: c.position,
+              age: c.age,
+              ratings: { overall: c.ratings.overall, potential: c.ratings.potential },
+              status: "FREE_AGENT",
+              askingSalary: asking,
+              askingYears: Math.max(1, Math.min(4, c.age >= 32 ? 2 : 4)),
+              contract: c.contract,
+            },
+            save.season,
+          );
+          let salary: number | null = null;
+          if (!snap.overCap) salary = Math.min(offer.avgSalary, snap.capSpace);
+          else if (!snap.overSecondApron) salary = Math.min(offer.avgSalary, MLE);
+          else if (c.ratings.overall < APRON_FILLER_MAX) salary = CBA.minimumSalary;
+          if (salary == null || salary < CBA.minimumSalary) continue;
+          const years = Math.max(1, Math.min(CBA.maxContractYears, c.age >= 32 ? 2 : 3));
+          tx.update(playersT)
+            .set({
+              teamId: t.id,
+              status: "ACTIVE",
+              role: "BENCH",
+              contract: {
+                type: salary >= 30 ? "MAX" : salary <= CBA.minimumSalary + 0.01 ? "MINIMUM" : "VETERAN",
+                years: Array.from({ length: years }, (_, i) => ({ season: save.season + i, salary: round2(salary) })),
+                birdRights: false,
+                noTrade: false,
+                option: null,
+                signedSeason: save.season,
+              },
+            })
+            .where(eq(playersT.id, c.id))
+            .run();
+          signed = true;
+          aiSigned++;
+          break;
+        }
+        if (!signed) break;
+      }
+    }
+    if (aiSigned > 0) {
+      logEvent(saveId, "FA", `自由市场收官：AI 球队按市场价补强 ${aiSigned} 人次`, { signings: aiSigned });
+    }
+
     // update AI phases from last season records
     // (records already reset — compute from standings before reset is skipped for simplicity)
 
@@ -1241,8 +1387,14 @@ export function startNewSeason(saveId: string) {
     // clear FA offers
     tx.delete(faOffersT).where(eq(faOffersT.saveId, saveId)).run();
 
+    // phaseState 里存着 userTeamId/rotation 等用户配置，不能整体清空——
+    // 只丢弃与旧赛季推进相关的瞬时状态（playoffs/draft 等）。
+    const prevPs = (save.phaseState as Record<string, unknown> | null) ?? {};
+    const carried: Record<string, unknown> = {};
+    if (prevPs.userTeamId) carried.userTeamId = prevPs.userTeamId;
+
     tx.update(saves)
-      .set({ season: save.season, phase: "REGULAR_SEASON", currentDate: `${save.season - 1}-10-21`, phaseState: null, updatedAt: now() })
+      .set({ season: save.season, phase: "REGULAR_SEASON", currentDate: `${save.season - 1}-10-21`, phaseState: carried as never, updatedAt: now() })
       .where(eq(saves.id, saveId))
       .run();
   });
@@ -1265,10 +1417,11 @@ export function submitFaOffer(saveId: string, playerId: string, years: number, a
   const ps = getPhaseState(saveId);
   const userTeamId = (ps.userTeamId as string) ?? null;
   if (!userTeamId) throw new EngineError("NO_USER_TEAM", "存档未选择球队");
+  const userShort = userTeamId.includes(":") ? userTeamId.split(":").pop()! : userTeamId;
 
-  const team = toTradeTeam(saveId, userTeamId);
+  const team = toTradeTeam(saveId, userShort);
   const rosterAfter = team.players.length + 1;
-  const afford = canAfford(team, avgSalary, rosterAfter);
+  const afford = canAfford(team, avgSalary, rosterAfter, team.deadMoney ?? 0);
 
   // AI competition
   const faPlayer = {
@@ -1297,7 +1450,7 @@ export function submitFaOffer(saveId: string, playerId: string, years: number, a
   db.transaction((tx) => {
     tx.update(playersT)
       .set({
-        teamId: `${saveId}:${userTeamId}`,
+        teamId: `${saveId}:${userShort}`,
         status: "ACTIVE",
         role: "BENCH",
         contract: {
@@ -1314,6 +1467,73 @@ export function submitFaOffer(saveId: string, playerId: string, years: number, a
   });
   logEvent(saveId, "FA", `签约成功：${player.name} ${avgSalary.toFixed(1)}M × ${years} 年`, { playerId, years, avgSalary, reasons: evalResult.reasons });
   return { accepted: true as const, interest: evalResult.interest, reasons: evalResult.reasons };
+}
+
+// ---------------------------------------------------------------------------
+// Waivers & dead money
+// ---------------------------------------------------------------------------
+
+type DeadCapEntry = { season: number; salary: number };
+
+function deadCapTable(saveId: string): Record<string, DeadCapEntry[]> {
+  const ps = getPhaseState(saveId);
+  return ((ps.deadCap as Record<string, DeadCapEntry[]>) ?? {}) as Record<string, DeadCapEntry[]>;
+}
+
+/** Dead-money cap hit for a team in the save's current season (short team id). */
+export function deadCapHit(saveId: string, teamShortId: string): number {
+  const save = getSave(saveId);
+  if (!save) return 0;
+  const entries = deadCapTable(saveId)[teamShortId] ?? [];
+  return round2(entries.filter((e) => e.season === save.season).reduce((a, e) => a + e.salary, 0));
+}
+
+/** All remaining dead-cap obligations for a team (short team id). */
+export function deadCapEntries(saveId: string, teamShortId: string): DeadCapEntry[] {
+  return deadCapTable(saveId)[teamShortId] ?? [];
+}
+
+/**
+ * Waive a player from the user's roster. The player becomes a free agent and
+ * every remaining guaranteed year stays on the books as dead money — the cap
+ * snapshot counts it via deadCapHit, so waiving a big contract frees a roster
+ * spot but never frees the money.
+ */
+export function waivePlayer(saveId: string, playerId: string) {
+  const db = getDb();
+  const save = getSave(saveId);
+  if (!save) throw new EngineError("NO_SAVE", "存档不存在");
+  const ps = getPhaseState(saveId);
+  const userTeamId = (ps.userTeamId as string) ?? null;
+  if (!userTeamId) throw new EngineError("NO_USER_TEAM", "存档未选择球队");
+  const userShort = userTeamId.includes(":") ? userTeamId.split(":").pop()! : userTeamId;
+
+  const player = db.select().from(playersT).where(eq(playersT.id, `${saveId}:${playerId}`)).get();
+  if (!player || player.teamId !== `${saveId}:${userShort}`) {
+    throw new EngineError("NOT_OWNED", "该球员不在你的阵容中");
+  }
+  const roster = db
+    .select()
+    .from(playersT)
+    .where(and(eq(playersT.saveId, saveId), eq(playersT.teamId, `${saveId}:${userShort}`)))
+    .all();
+  if (roster.length - 1 < CBA.minRosterSize) {
+    throw new EngineError("ROSTER_MIN", `裁员后人数将低于下限 ${CBA.minRosterSize} 人`);
+  }
+
+  const deadEntries: DeadCapEntry[] = player.contract.years
+    .filter((y) => y.season >= save.season)
+    .map((y) => ({ season: y.season, salary: y.salary }));
+  const total = round2(deadEntries.reduce((a, e) => a + e.salary, 0));
+
+  db.transaction((tx) => {
+    tx.update(playersT).set({ teamId: null, status: "FREE_AGENT", role: "BENCH" }).where(eq(playersT.id, player.id)).run();
+    const cur = deadCapTable(saveId);
+    cur[userShort] = [...(cur[userShort] ?? []), ...deadEntries];
+    tx.update(saves).set({ phaseState: { ...ps, deadCap: cur } as never, updatedAt: now() }).where(eq(saves.id, saveId)).run();
+  });
+  logEvent(saveId, "ROSTER", `裁掉 ${player.name}：剩余 ${deadEntries.length} 年合同共 ${total.toFixed(1)}M 计入死钱`, { playerId, deadEntries, total });
+  return { waived: player.name, deadMoney: deadEntries, total };
 }
 
 // ---------------------------------------------------------------------------
@@ -1474,9 +1694,10 @@ export function getTeamAssets(saveId: string, teamId: string) {
   const db = getDb();
   const roster = db.select().from(playersT).where(and(eq(playersT.saveId, saveId), eq(playersT.teamId, `${saveId}:${teamId}`))).all();
   const picks = db.select().from(picksT).where(and(eq(picksT.saveId, saveId), eq(picksT.holderTeamId, `${saveId}:${teamId}`))).all();
-  const snap = capSnapshot(roster, roster.length);
+  const snap = capSnapshot(roster, roster.length, deadCapHit(saveId, teamId));
   return {
     cap: snap,
+    deadCap: deadCapEntries(saveId, teamId),
     picks: picks.map((p) => ({ id: p.id.split(":").slice(1).join(":"), year: p.year, round: p.round, status: p.status, protection: p.protection, originalTeamId: p.originalTeamId.split(":").slice(1).join(":") })),
     contracts: roster.map((p) => ({ id: p.id.split(":").slice(1).join(":"), name: p.name, contract: p.contract, overall: p.ratings.overall })),
     versions: { cba: CBA_VERSION, rating: RATING_VERSION, chemistry: CHEMISTRY_VERSION, trade: TRADE_RULES_VERSION },

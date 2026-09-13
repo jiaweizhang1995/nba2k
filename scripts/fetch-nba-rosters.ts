@@ -139,14 +139,17 @@ interface ParsedPlayer {
   wikiTitle: string | null; // en.wikipedia article title for stats lookup
 }
 
+/**
+ * Keep the raw Wikipedia position token (normalized): G / GF / F / FC / CF / C
+ * are the only tags Wikipedia roster templates use — they never split PG from
+ * SG. The factual token is preserved here; resolvePositions() in
+ * src/domain/positions.ts maps it to the game's 5-slot model at import time
+ * using stats/height as tie-breakers.
+ */
 function mapPosition(pos: string): string {
-  const p = pos.toUpperCase().replace(/\s/g, "");
-  if (p === "PG") return "PG";
-  if (p === "SG" || p === "G" || p === "GF" || p === "FG") return "SG";
-  if (p === "SF" || p === "F") return "SF";
-  if (p === "PF" || p === "FC") return "PF";
-  if (p === "C") return "C";
-  return "SF";
+  const p = pos.toUpperCase().replace(/[^A-Z]/g, "");
+  const known = new Set(["PG", "SG", "SF", "PF", "C", "G", "F", "GF", "FG", "FC", "CF"]);
+  return known.has(p) ? p : "F";
 }
 
 function computeAge(dob: string): number | null {

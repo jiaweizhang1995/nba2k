@@ -216,9 +216,10 @@ export default function GmHome() {
           <Section title="当前首发与轮换" right={<Link href="/roster" className="text-[12px] text-[var(--accent)]">{dash.rotation.configured ? "编辑" : "去设置"} →</Link>}>
             {!dash.rotation.configured && <div className="text-[11px] text-[var(--warn)] mb-2">尚未手动配置轮换，引擎按角色自动分配时间。到「阵容」页设置首发与分钟数。</div>}
             <div className="space-y-1">
-              {dash.rotation.starters.map((p) => (
+              {dash.rotation.starters.map((p, i) => (
                 <div key={p.id} className="flex items-center justify-between text-[12px] py-1 border-b border-[#1a2440] gap-2">
                   <span className="font-medium">
+                    <span className="text-[var(--accent)] font-bold w-7 inline-block">{["PG", "SG", "SF", "PF", "C"][i]}</span>
                     {p.name} <span className="text-[var(--text-dim)]">{p.position}</span>
                     {p.injured && <span className="text-[var(--bad)] ml-1">伤停</span>}
                     {p.stamina < 70 && <span className="text-[var(--warn)] ml-1">体力 {p.stamina}%</span>}

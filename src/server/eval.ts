@@ -28,6 +28,7 @@ import { providerChat, STAGE_ALLOWED_ACTIONS, type GmAction } from "@/lib/eval-p
 import { decryptKey, encryptKey, maskKey } from "@/lib/eval-crypto";
 import {
   advanceSim,
+  deadCapHit,
   executeTrade,
   getAiTradeFeedback,
   getChemistry,
@@ -40,6 +41,7 @@ import {
   startNewSeason,
   submitFaOffer,
   validateTradeOnServer,
+  waivePlayer,
 } from "./engine";
 
 export const uuid = () => globalThis.crypto.randomUUID();
@@ -102,7 +104,8 @@ function cloneSaveForEval(baseSaveId: string, seed: number, teamShortId: string,
       tx.insert(gamesT).values({ ...g, id: `${newId}:${shortId(g.id)}`, saveId: newId, homeTeamId: `${newId}:${shortId(g.homeTeamId)}`, awayTeamId: `${newId}:${shortId(g.awayTeamId)}` }).run();
     }
     for (const a of db.select().from(awardsT).where(eq(awardsT.saveId, baseSaveId)).all()) {
-      tx.insert(awardsT).values({ ...a, id: `${newId}:${shortId(a.id)}`, saveId: newId, teamId: a.teamId ? `${newId}:${shortId(a.teamId)}` : null, playerId: a.playerId ? `${newId}:${shortId(a.playerId)}` : null }).run();
+      // Award ids are bare uuids (no saveId prefix) — keep them unique with a fresh id.
+      tx.insert(awardsT).values({ ...a, id: uuid(), saveId: newId, teamId: a.teamId ? `${newId}:${shortId(a.teamId)}` : null, playerId: a.playerId ? `${newId}:${shortId(a.playerId)}` : null }).run();
     }
     // faOffers / events / dataSources 为历史记录，评测世界无需携带
   });
@@ -212,6 +215,7 @@ function teamRoster(evalRow: { saveId: string; teamFullId: string }) {
   const db = getDb();
   const rows = db.select().from(playersT).where(and(eq(playersT.saveId, evalRow.saveId), eq(playersT.teamId, evalRow.teamFullId))).all();
   return rows.map((p) => ({
+    id: shortId(p.id),
     name: p.name,
     position: p.position,
     age: p.age,
@@ -225,7 +229,7 @@ function teamRoster(evalRow: { saveId: string; teamFullId: string }) {
 function capSummaryOf(saveId: string, teamFullId: string) {
   const db = getDb();
   const roster = db.select().from(playersT).where(and(eq(playersT.saveId, saveId), eq(playersT.teamId, teamFullId))).all();
-  return capSnapshot(roster, roster.length);
+  return capSnapshot(roster, roster.length, deadCapHit(saveId, shortId(teamFullId)));
 }
 
 function toolGetRoster(evalRow: { saveId: string; teamFullId: string; seed: number }): ToolResult {
@@ -246,14 +250,14 @@ function toolGetAssets(evalRow: { saveId: string; teamFullId: string; seed: numb
     .where(and(eq(picksT.saveId, evalRow.saveId), eq(picksT.holderTeamId, evalRow.teamFullId)))
     .all()
     .filter((p) => p.status === "OWNED")
-    .map((p) => ({ year: p.year, round: p.round, protection: p.protection?.type ?? "NONE" }));
+    .map((p) => ({ id: shortId(p.id), year: p.year, round: p.round, protection: p.protection?.type ?? "NONE" }));
   const cap = capSummaryOf(evalRow.saveId, evalRow.teamFullId);
   const contracts = db
     .select()
     .from(playersT)
     .where(and(eq(playersT.saveId, evalRow.saveId), eq(playersT.teamId, evalRow.teamFullId)))
     .all()
-    .map((p) => ({ name: p.name, salary: p.contract.years[0]?.salary ?? 0, endSeason: p.contract.years[p.contract.years.length - 1]?.season ?? null }))
+    .map((p) => ({ id: shortId(p.id), name: p.name, salary: p.contract.years[0]?.salary ?? 0, endSeason: p.contract.years[p.contract.years.length - 1]?.season ?? null }))
     .sort((a, b) => b.salary - a.salary)
     .slice(0, 8);
   return {
@@ -270,7 +274,7 @@ function toolGetMarket(evalRow: { saveId: string; teamFullId: string; seed: numb
     .from(playersT)
     .where(and(eq(playersT.saveId, evalRow.saveId), eq(playersT.status, "FREE_AGENT")))
     .all()
-    .map((p) => ({ name: p.name, position: p.position, age: p.age, overall: p.ratings.overall, asking: Math.max(1.2, (p.contract.years[0]?.salary ?? 5) * 1.05) }))
+    .map((p) => ({ id: shortId(p.id), name: p.name, position: p.position, age: p.age, overall: p.ratings.overall, asking: Math.max(1.2, (p.contract.years[0]?.salary ?? 5) * 1.05) }))
     .sort((a, b) => b.overall - a.overall)
     .slice(0, 12);
   const teams = db.select().from(teamsT).where(eq(teamsT.saveId, evalRow.saveId)).all();
@@ -285,9 +289,9 @@ function toolGetMarket(evalRow: { saveId: string; teamFullId: string; seed: numb
         .all()
         .sort((a, b) => b.ratings.overall - a.ratings.overall)
         .slice(0, 4)
-        .map((p) => ({ name: p.name, overall: p.ratings.overall, salary: p.contract.years[0]?.salary ?? 0 }));
+        .map((p) => ({ id: shortId(p.id), name: p.name, overall: p.ratings.overall, salary: p.contract.years[0]?.salary ?? 0 }));
       const cap = capSummaryOf(evalRow.saveId, t.id);
-      return { team: `${t.city} ${t.name}`, abbr: t.abbr, capSpace: cap.capSpace, rosterSample: roster };
+      return { teamId: shortId(t.id), team: `${t.city} ${t.name}`, abbr: t.abbr, capSpace: cap.capSpace, rosterSample: roster };
     });
   return { summary: `查看市场：自由球员 ${fas.length} 人（展示前 12），球队样本 ${sample.length}`, data: { freeAgents: fas, teams: sample }, isAction: false };
 }
@@ -502,6 +506,7 @@ function buildObservation(evalRow: { saveId: string; teamFullId: string; teamSho
   const chemistry = getChemistry(evalRow.saveId, evalRow.teamShortId);
   const base = {
     stage,
+    allowedActions: STAGE_ALLOWED_ACTIONS[stage] ?? [],
     season: `${state.season - 1}-${String(state.season).slice(2)}`,
     currentDate: state.currentDate,
     myTeam: team ? `${team.city} ${team.name}` : "?",
@@ -518,7 +523,7 @@ function buildObservation(evalRow: { saveId: string; teamFullId: string; teamSho
   if (stage === "DRAFT") {
     const board = getDraftBoard(evalRow.saveId)
       .slice(0, 10)
-      .map((p) => ({ name: p.name, pos: p.position, age: p.age, ovr: p.ratings.overall, upside: p.ratings.potentialHigh, strength: p.scouting.strengths[0] ?? "" }));
+      .map((p) => ({ id: p.id, name: p.name, pos: p.position, age: p.age, ovr: p.ratings.overall, upside: p.ratings.potentialHigh, strength: p.scouting.strengths[0] ?? "" }));
     const order = getDraftOrder(evalRow.saveId);
     const donePicks = getDb().select().from(picksT).where(and(eq(picksT.saveId, evalRow.saveId), eq(picksT.year, state.season), eq(picksT.status, "EXERCISED"))).all().length;
     const mine = order.findIndex((o, i) => i >= donePicks && shortId(o.holderTeamId) === evalRow.teamShortId);
@@ -540,11 +545,12 @@ function standingsRank(state: ReturnType<typeof loadLeagueState>, teamShortId: s
 }
 
 const SYSTEM_PROMPT = `你是篮球经理模拟游戏《HARDWOOD GM》中的球队总经理 AI。你通过返回严格 JSON 动作来运营球队。
-可用动作（必须逐字使用 action 字段）：
-- get_roster / get_assets / get_market：查看信息
-- propose_trade：params = { partnerTeamId, givePlayerIds[], givePickIds[], receivePlayerIds[], receivePickIds[] }（所有 id 为服务器提供）
-- sign_free_agent：params = { playerId, years, avgSalary }（自由市场阶段）
-- draft_pick：params = { prospectId? }（选秀阶段；省略则选最优）
+可用动作（必须逐字使用 action 字段；观察里的 allowedActions 列出当前阶段合法动作）：
+- get_roster / get_assets / get_market：查看信息（返回的对象都带 id 字段，动作参数必须使用这些 id，禁止猜测）
+- propose_trade：params = { partnerTeamId, givePlayerIds[], givePickIds[], receivePlayerIds[], receivePickIds[] }（partnerTeamId 用球队 teamId，其余用球员/选秀权的 id）
+- sign_free_agent：params = { playerId, years, avgSalary }（自由市场阶段；playerId 来自 freeAgents[].id）
+- waive_player：params = { playerId }（裁掉我方球员；剩余合同变为死钱仍占工资帽）
+- draft_pick：params = { prospectId? }（选秀阶段；prospectId 来自 topProspects[].id，省略则选最优）
 - finish_draft：剩余选秀全部自动完成
 - set_strategy：params = { text }（记录你的建队策略）
 - advance_season：推进当前赛季到结束（常规赛+季后赛）
@@ -566,6 +572,26 @@ interface StepOutcome {
 
 // 进程内步进锁：防止多个客户端（页面循环 + API）并发步进同一评测
 const stepLocks = new Set<string>();
+
+/**
+ * 一键跑完：服务端循环步进直到终态（DONE/ERROR/CANCELLED/PAUSED）或达到
+ * maxSteps。供 agent/脚本使用——一次 POST 即可，无需手动轮询 /step。
+ * 步进锁与状态机保证中断/并发安全：已暂停或被其他客户端步进的评测立即返回。
+ */
+export async function runEvaluation(id: string, opts: { maxSteps?: number } = {}): Promise<{ state: StepOutcome; steps: number }> {
+  const evalRow = getEvaluationRow(id);
+  if (!evalRow) throw new EvalError("NO_EVAL", "评测不存在");
+  const maxSteps = Math.min(MAX_TURNS, Math.max(1, opts.maxSteps ?? MAX_TURNS));
+  let state: StepOutcome | null = null;
+  let steps = 0;
+  for (let i = 0; i < maxSteps; i++) {
+    state = await stepEvaluation(id);
+    steps++;
+    if (state.done || state.status !== "RUNNING") break;
+    if (state.lastTurn?.action === "busy") break;
+  }
+  return { state: state!, steps };
+}
 
 export async function stepEvaluation(id: string): Promise<StepOutcome> {
   if (stepLocks.has(id)) {
@@ -683,7 +709,7 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
     if (evalRow.turnIndex === 0) messages.unshift({ role: "assistant", content: "评测开始。" });
     // DeepSeek may include the public decision fields after its reasoning; leave
     // enough output budget for one complete action object.
-    const r = await providerChat(cfg, { system: SYSTEM_PROMPT, messages, maxTokens: 1200 }, stubScene);
+    const r = await providerChat(cfg, { system: SYSTEM_PROMPT, messages, maxTokens: 2048 }, stubScene);
     latencyMs = r.latencyMs;
     tokensIn = r.tokensIn;
     tokensOut = r.tokensOut;
@@ -703,14 +729,16 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
         .where(eq(evaluationsT.id, id))
         .run();
       // 连续 3 次 Provider 失败 → 熔断为 ERROR（避免空转 600 轮）
+      // 取最近 3 个回合（而非最近 3 次错误）：中间有成功回合即视为已恢复，
+      // 只有真正连续的失败才熔断。
       const recentErrors = db
         .select()
         .from(evalTurnsT)
-        .where(and(eq(evalTurnsT.evaluationId, id), eq(evalTurnsT.action, "provider_error")))
+        .where(eq(evalTurnsT.evaluationId, id))
         .orderBy(desc(evalTurnsT.turnIndex))
         .limit(3)
         .all();
-      if (recentErrors.length >= 3 && recentErrors.every((t) => !t.ok)) {
+      if (recentErrors.length >= 3 && recentErrors.every((t) => t.action === "provider_error" && !t.ok)) {
         db.update(evaluationsT)
           .set({ status: "ERROR", error: `Provider 连续失败：${(r.error ?? "解析失败").slice(0, 200)}`, updatedAt: now() })
           .where(eq(evaluationsT.id, id))
@@ -753,6 +781,11 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
           if (stage !== "FREE_AGENCY") throw new EvalError("WRONG_STAGE", "签约仅在自由市场阶段");
           toolResult = toolSignFreeAgent({ ...evalCtx }, params);
           break;
+        case "waive_player": {
+          const r = waivePlayer(evalRow.saveId, String(params.playerId ?? ""));
+          toolResult = { summary: `裁掉 ${r.waived}，死钱 ${r.total.toFixed(1)}M 分 ${r.deadMoney.length} 年计入工资帽`, data: r as unknown as Record<string, unknown>, isAction: true, legal: true };
+          break;
+        }
         case "draft_pick":
           toolResult = toolDraftPick({ ...evalCtx }, params);
           break;
@@ -765,7 +798,13 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
           break;
         case "advance_season": {
           const r = advanceSim(evalRow.saveId, "SEASON");
-          toolResult = { summary: `赛季推进完成：${r.days} 天 / ${r.gamesPlayed} 场${r.phaseChanged ? `，进入 ${r.phaseChanged}` : ""}`, data: { days: r.days, games: r.gamesPlayed }, isAction: true, legal: true };
+          const champTeam = r.champion ? getDb().select().from(teamsT).where(eq(teamsT.id, `${evalRow.saveId}:${r.champion}`)).get() : null;
+          toolResult = {
+            summary: `赛季推进完成：${r.days} 天 / ${r.gamesPlayed} 场${r.phaseChanged ? `，进入 ${r.phaseChanged}` : ""}${champTeam ? `，总冠军 ${champTeam.city} ${champTeam.name}` : ""}`,
+            data: { days: r.days, games: r.gamesPlayed, champion: champTeam ? `${champTeam.city} ${champTeam.name}` : null },
+            isAction: true,
+            legal: true,
+          };
           break;
         }
         case "start_new_season": {

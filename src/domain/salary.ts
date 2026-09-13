@@ -80,8 +80,8 @@ export interface CapSnapshot {
   rosterCount: number;
 }
 
-export function capSnapshot(teamPlayers: Pick<PlayerRow, "contract">[], rosterCount: number): CapSnapshot {
-  const totalSalary = round2(teamSalary(teamPlayers));
+export function capSnapshot(teamPlayers: Pick<PlayerRow, "contract">[], rosterCount: number, deadMoney = 0): CapSnapshot {
+  const totalSalary = round2(teamSalary(teamPlayers) + deadMoney);
   const overCap = totalSalary > CBA.salaryCap;
   const overTax = totalSalary > CBA.luxuryTax;
   const overFirstApron = totalSalary > CBA.firstApron;

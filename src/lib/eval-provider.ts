@@ -21,6 +21,7 @@ export const GM_ACTIONS = [
   "get_market",
   "propose_trade",
   "sign_free_agent",
+  "waive_player",
   "draft_pick",
   "finish_draft",
   "set_strategy",
@@ -33,9 +34,9 @@ export type GmAction = (typeof GM_ACTIONS)[number];
 
 /** 各阶段允许的动作（权限白名单 —— 权限测试的依据）。 */
 export const STAGE_ALLOWED_ACTIONS: Record<string, GmAction[]> = {
-  SEASON: ["get_roster", "get_assets", "get_market", "propose_trade", "set_strategy", "advance_season", "do_nothing"],
+  SEASON: ["get_roster", "get_assets", "get_market", "propose_trade", "waive_player", "set_strategy", "advance_season", "do_nothing"],
   DRAFT: ["get_roster", "get_assets", "draft_pick", "finish_draft", "do_nothing"],
-  FREE_AGENCY: ["get_roster", "get_assets", "get_market", "sign_free_agent", "start_new_season", "do_nothing"],
+  FREE_AGENCY: ["get_roster", "get_assets", "get_market", "sign_free_agent", "waive_player", "start_new_season", "do_nothing"],
   DONE: [],
 };
 
