@@ -47,6 +47,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
       satisfaction: p.satisfaction,
       injury: p.injury,
       development: p.development,
+      stamina: p.stamina,
       baselineStats: p.baselineStats ?? null,
       source: p.source,
     }));

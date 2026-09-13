@@ -70,7 +70,7 @@ export function evaluateOffer(
 
   // Team quality: contenders pay less but attract
   const teamQuality = team.players.reduce((a, p) => a + p.ratings.overall, 0) / Math.max(1, team.players.length);
-  interest += (teamQuality - 55) * 0.8;
+  interest += (teamQuality - 74) * 1.8;
   reasons.push(`球队实力评估 ${teamQuality.toFixed(0)} 分，影响加盟意愿`);
 
   interest -= competitorInterest * 0.4;
@@ -85,7 +85,7 @@ export function evaluateOffer(
 /** AI teams generate interest in a FA (used for competition simulation). */
 export function aiCompetitionLevel(player: FaPlayer, seed: number, season: number): number {
   const rng = rngFor(seed, `fa-comp:${season}:${player.id}`);
-  const base = (player.ratings.overall - 60) * 2.2;
+  const base = (player.ratings.overall - 74) * 4.6;
   return Math.max(0, Math.min(100, base + rng.float(-10, 15)));
 }
 

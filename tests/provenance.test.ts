@@ -71,26 +71,28 @@ describe("Import provenance enforcement", () => {
   });
 });
 
-describe("Ratings v1.1 from real per-game stats", () => {
+describe("Ratings v1.3 from real per-game stats (2K27-calibrated band)", () => {
   const star = { season: 2026, teamRow: "BOS", g: 70, gs: 70, mpg: 36, fgPct: 0.49, tpPct: 0.38, ftPct: 0.85, rpg: 8.5, apg: 5.5, spg: 1.1, bpg: 0.6, ppg: 28 };
   const role = { season: 2026, teamRow: "BOS", g: 65, gs: 30, mpg: 24, fgPct: 0.45, tpPct: 0.37, ftPct: 0.8, rpg: 3.5, apg: 1.8, spg: 0.7, bpg: 0.2, ppg: 9 };
   const bench = { season: 2026, teamRow: "BOS", g: 40, gs: 2, mpg: 12, fgPct: 0.42, tpPct: 0.33, ftPct: 0.72, rpg: 1.8, apg: 0.8, spg: 0.3, bpg: 0.1, ppg: 4 };
 
   it("real superstar production maps to elite overall with high confidence", () => {
     const r = computeRatingsFromPerGame(star, "SF", 27);
-    expect(r.ratingVersion).toBe("RATING-ENGINE v1.1");
+    expect(r.ratingVersion).toBe("RATING-ENGINE v1.3");
+    // 联盟分布校准后：巨星落在 2K 风格的 85-89 档
     expect(r.overall).toBeGreaterThanOrEqual(84);
-    expect(r.overall).toBeLessThanOrEqual(97);
+    expect(r.overall).toBeLessThanOrEqual(92);
     expect(r.confidence).toBe(1);
   });
 
   it("role player and bench map to realistic mid/below bands", () => {
     const rr = computeRatingsFromPerGame(role, "SG", 24);
     const rb = computeRatingsFromPerGame(bench, "SG", 22);
-    expect(rr.overall).toBeGreaterThanOrEqual(46);
-    expect(rr.overall).toBeLessThanOrEqual(66);
+    // 联盟下限 68：轮换 71-80，替补更低但不出下限
+    expect(rr.overall).toBeGreaterThanOrEqual(70);
+    expect(rr.overall).toBeLessThanOrEqual(80);
     expect(rb.overall).toBeLessThan(rr.overall);
-    expect(rb.overall).toBeGreaterThanOrEqual(28);
+    expect(rb.overall).toBeGreaterThanOrEqual(68);
   });
 
   it("low sample lowers confidence honestly", () => {

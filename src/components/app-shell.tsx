@@ -2,25 +2,41 @@
 
 // App shell: sidebar nav + top bar. High-density management-sim layout,
 // desktop-first, collapses to icon rail + stacked panels at tablet width.
+// 导航分三组：日常主流程 / 球队运作 / 更多（低频与配置），当前页高亮。
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useSave, PHASE_LABEL } from "./save-context";
 
-const NAV = [
-  { href: "/", label: "存档管理", icon: "⌂" },
-  { href: "/gm", label: "总经理首页", icon: "◎" },
-  { href: "/roster", label: "阵容", icon: "☰" },
-  { href: "/trade", label: "交易中心", icon: "⇄" },
-  { href: "/draft", label: "选秀", icon: "✦" },
-  { href: "/freeagency", label: "自由市场", icon: "✍" },
-  { href: "/sim", label: "比赛模拟", icon: "▶" },
-  { href: "/chemistry", label: "化学反应", icon: "♥" },
-  { href: "/assets", label: "资产", icon: "▣" },
-  { href: "/league", label: "联盟", icon: "≡" },
-  { href: "/log", label: "操作日志", icon: "⌗" },
-  { href: "/eval", label: "AI 评测", icon: "★" },
-  { href: "/settings", label: "设置", icon: "⚙" },
+const NAV_GROUPS: { label: string; items: { href: string; label: string; icon: string }[] }[] = [
+  {
+    label: "日常",
+    items: [
+      { href: "/gm", label: "总经理首页", icon: "◎" },
+      { href: "/sim", label: "比赛推进", icon: "▶" },
+      { href: "/roster", label: "轮换与阵容", icon: "☰" },
+      { href: "/league", label: "联盟", icon: "≡" },
+    ],
+  },
+  {
+    label: "球队运作",
+    items: [
+      { href: "/trade", label: "交易中心", icon: "⇄" },
+      { href: "/freeagency", label: "自由市场", icon: "✍" },
+      { href: "/draft", label: "选秀", icon: "✦" },
+      { href: "/assets", label: "资产", icon: "▣" },
+    ],
+  },
+  {
+    label: "更多",
+    items: [
+      { href: "/chemistry", label: "化学反应", icon: "♥" },
+      { href: "/eval", label: "AI 评测", icon: "★" },
+      { href: "/log", label: "操作日志", icon: "⌗" },
+      { href: "/settings", label: "设置与数据来源", icon: "⚙" },
+      { href: "/", label: "存档管理", icon: "⌂" },
+    ],
+  },
 ];
 
 export function AppShell({ children }: { children: React.ReactNode }) {
@@ -31,28 +47,36 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const isGod = !!save?.godMode;
   const isDemo = save?.dataStatus !== "IMPORTED";
 
+  const isActive = (href: string) => (href === "/" ? pathname === "/" : pathname.startsWith(href));
+
   return (
     <div className="flex min-h-screen">
-      <aside className="w-14 md:w-44 shrink-0 border-r border-[var(--border)] bg-[var(--bg-panel)] flex flex-col sticky top-0 h-screen">
+      <aside className="w-14 md:w-44 shrink-0 border-r border-[var(--border)] bg-[var(--bg-panel)] flex flex-col sticky top-0 h-screen overflow-y-auto">
         <div className="px-3 py-4 border-b border-[var(--border)]">
           <div className="text-[13px] font-bold tracking-wider text-[var(--accent)] hidden md:block">HARDWOOD GM</div>
           <div className="text-[10px] text-[var(--text-dim)] hidden md:block">职业篮球经理模拟</div>
         </div>
         <nav className="flex-1 py-2">
-          {NAV.map((n) => {
-            const active = pathname.startsWith(n.href);
-            return (
-              <Link
-                key={n.href}
-                href={n.href}
-                className={`flex items-center gap-3 px-3 md:px-4 py-2.5 text-[13px] hover:bg-[var(--bg-panel2)] ${active ? "bg-[var(--bg-panel2)] text-[var(--accent)] border-l-2 border-[var(--accent)]" : "text-[var(--text)] border-l-2 border-transparent"}`}
-                title={n.label}
-              >
-                <span className="text-[15px] w-5 text-center">{n.icon}</span>
-                <span className="hidden md:inline">{n.label}</span>
-              </Link>
-            );
-          })}
+          {NAV_GROUPS.map((group, gi) => (
+            <div key={group.label}>
+              {gi > 0 && <div className="mx-3 my-2 border-t border-[var(--border)]" />}
+              <div className="px-3 md:px-4 pt-1.5 pb-1 text-[10px] uppercase tracking-wider text-[var(--text-dim)] hidden md:block">{group.label}</div>
+              {group.items.map((n) => {
+                const active = isActive(n.href);
+                return (
+                  <Link
+                    key={n.href}
+                    href={n.href}
+                    className={`flex items-center gap-3 px-3 md:px-4 py-2.5 text-[13px] hover:bg-[var(--bg-panel2)] ${active ? "bg-[var(--bg-panel2)] text-[var(--accent)] font-semibold border-l-2 border-[var(--accent)]" : "text-[var(--text)] border-l-2 border-transparent"}`}
+                    title={n.label}
+                  >
+                    <span className="text-[15px] w-5 text-center">{n.icon}</span>
+                    <span className="hidden md:inline">{n.label}</span>
+                  </Link>
+                );
+              })}
+            </div>
+          ))}
         </nav>
       </aside>
 
@@ -97,7 +121,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               )}
               {summary?.chemistry && (
                 <div className="text-[12px] text-[var(--text-dim)]">
-                  化学反应 <span className={chemColor(summary.chemistry.overall)}>{summary.chemistry.overall}</span>
+                  阵容状态 <span className={chemColor(summary.chemistry.overall)}>{chemLabel(summary.chemistry.overall)}</span>
                 </div>
               )}
             </>
@@ -110,6 +134,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </div>
     </div>
   );
+}
+
+function chemLabel(v: number) {
+  if (v >= 75) return "磨合成熟";
+  if (v >= 55) return "一般";
+  return "存在隐患";
 }
 
 function chemColor(v: number) {

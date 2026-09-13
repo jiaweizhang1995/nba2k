@@ -17,7 +17,7 @@ import {
   faOffers as faOffersT,
   awards as awardsT,
 } from "@/db/schema";
-import { computeRatings, computeRatingsFromPerGame, RATING_VERSION, RATING_VERSION_V11 } from "@/domain/ratings";
+import { blendWithMarketEstimate, computeRatings, computeRatingsFromPerGame, estimateRatingsFromSalary, RATING_VERSION, RATING_VERSION_V13 } from "@/domain/ratings";
 import { createSchedule, type LeagueState } from "@/domain/sim/season";
 import { hashSeed } from "@/domain/rng";
 import type { SeasonStatLine } from "@/domain/types";
@@ -160,7 +160,7 @@ export async function importData(saveId: string, payload: ImportPayload): Promis
         | "PF"
         | "C";
       const perGame = p.perGame ?? null;
-      const ratings = perGame
+      let ratings = perGame
         ? computeRatingsFromPerGame(perGame, position, p.age || 25, {
             potential: p.potential,
             potentialLow: p.potentialLow,
@@ -171,9 +171,28 @@ export async function importData(saveId: string, payload: ImportPayload): Promis
             potentialLow: p.potentialLow,
             potentialHigh: p.potentialHigh,
           });
-      // No statistics in the source → neutral placeholder overall with zero
-      // confidence, shown honestly in the UI; never a made-up rating.
-      if (!perGame && !p.statLine.pts) ratings.overall = 50;
+      // No statistics in the source:
+      //  - has a real contract → transparent market-value estimate (salary is
+      //    a live public fact; confidence 0.15, version marked -EST);
+      //  - no stats and no contract → neutral placeholder overall 50 with
+      //    zero confidence, shown honestly in the UI; never a made-up rating.
+      const salaryM = p.contract?.years?.[0]?.salary ?? null;
+      if (!perGame && !p.statLine.pts) {
+        if (salaryM && salaryM > 0) {
+          ratings = estimateRatingsFromSalary(salaryM, position, p.age || 25, p.externalId, {
+            potential: p.potential,
+            potentialLow: p.potentialLow,
+            potentialHigh: p.potentialHigh,
+          });
+        } else {
+          ratings.overall = 50;
+        }
+      } else if (salaryM && salaryM > 0) {
+        // 有统计但样本很小（边缘轮换、短时间 call-up）：统计公式会被极低
+        // 分钟数拉爆，按置信度混入市场估值，避免 2 分钟样本评出 25 分。
+        const sampleMpg = perGame?.mpg ?? (statLine.g > 0 ? statLine.mp / statLine.g : 99);
+        ratings = blendWithMarketEstimate(ratings, salaryM, position, p.age || 25, p.externalId, sampleMpg);
+      }
       const teamFullId = p.teamAbbr ? teamIdByAbbr.get(p.teamAbbr.toUpperCase()) ?? null : null;
       tx.insert(playersT)
         .values({
@@ -217,7 +236,7 @@ export async function importData(saveId: string, payload: ImportPayload): Promis
             season: p.meta.season,
             licenseNote: p.meta.licenseNote,
             status: "IMPORTED",
-            ratingVersion: perGame ? RATING_VERSION_V11 : RATING_VERSION,
+            ratingVersion: perGame ? RATING_VERSION_V13 : RATING_VERSION,
           },
         })
         .run();
@@ -237,7 +256,7 @@ export async function importData(saveId: string, payload: ImportPayload): Promis
       const totalPpg = roster.reduce((a, r) => a + ((r.baselineStats as { ppg?: number } | null)?.ppg ?? 0), 0);
       const sorted = [...roster].sort((a, b) => b.ratings.overall - a.ratings.overall);
       sorted.forEach((row, i) => {
-        const role = i === 0 && row.ratings.overall >= 78 ? "STAR" : i === 1 && row.ratings.overall >= 76 ? "STAR" : i < 5 ? "STARTER" : i === 5 && row.ratings.overall >= 68 ? "SIXTH_MAN" : i < 10 ? "ROTATION" : "BENCH";
+        const role = i === 0 && row.ratings.overall >= 86 ? "STAR" : i === 1 && row.ratings.overall >= 84 ? "STAR" : i < 5 ? "STARTER" : i === 5 && row.ratings.overall >= 79 ? "SIXTH_MAN" : i < 10 ? "ROTATION" : "BENCH";
         tx.update(playersT).set({ role }).where(eq(playersT.id, row.id)).run();
       });
       if (totalPpg <= 0) continue;
@@ -245,10 +264,10 @@ export async function importData(saveId: string, payload: ImportPayload): Promis
         const base = row.baselineStats as { ppg?: number } | null;
         if (!base?.ppg) continue;
         const share = base.ppg / totalPpg;
+        // 只精修 usageTendency；ratingVersion 反映实际评分公式（v1.3 等），不在此覆写
         const ratings = {
           ...row.ratings,
           usageTendency: Math.round(Math.max(0.05, Math.min(0.42, share)) * 100) / 100,
-          ratingVersion: RATING_VERSION_V11,
         };
         tx.update(playersT).set({ ratings }).where(eq(playersT.id, row.id)).run();
       }
@@ -344,7 +363,7 @@ export async function importData(saveId: string, payload: ImportPayload): Promis
       .set({
         dataProvider: provider,
         dataStatus: "IMPORTED",
-        ratingVersion: anyPerGame ? RATING_VERSION_V11 : RATING_VERSION,
+        ratingVersion: anyPerGame ? RATING_VERSION_V13 : RATING_VERSION,
         phase: "REGULAR_SEASON",
         currentDate: `${season - 1}-10-21`,
         phaseState: nextPhaseState,

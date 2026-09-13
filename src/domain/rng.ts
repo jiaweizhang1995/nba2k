@@ -89,6 +89,19 @@ export class PRNG {
     }
     return items[items.length - 1];
   }
+
+  /** Weighted index pick. Empty input → -1; all-zero weights → uniform. */
+  weightedIndex(weights: readonly number[]): number {
+    if (weights.length === 0) return -1;
+    const total = weights.reduce((a, b) => a + Math.max(0, b), 0);
+    if (total <= 0) return Math.floor(this.next() * weights.length);
+    let r = this.next() * total;
+    for (let i = 0; i < weights.length; i++) {
+      r -= Math.max(0, weights[i]);
+      if (r <= 0) return i;
+    }
+    return weights.length - 1;
+  }
 }
 
 /** Convenience: create a PRNG for a given save context. */

@@ -99,7 +99,7 @@ export function computeChemistry(players: ChemPlayer[], ctx: TeamContext): Chemi
   const o1 = rotation[0].ratings.overall;
   const o2 = rotation[1]?.ratings.overall ?? 40;
   const starCount = rotation.filter((p) => p.role === "STAR").length;
-  const hierarchy = starCount >= 3 ? 62 - (starCount - 3) * 15 : o1 - o2 >= 4 ? 88 : o1 - o2 <= 1 && o1 >= 84 ? 66 : 78;
+  const hierarchy = starCount >= 3 ? 62 - (starCount - 3) * 15 : o1 - o2 >= 4 ? 88 : o1 - o2 <= 1 && o1 >= 87 ? 66 : 78;
   factors.push({
     key: "hierarchy",
     label: "球星层级",
@@ -107,19 +107,19 @@ export function computeChemistry(players: ChemPlayer[], ctx: TeamContext): Chemi
     note:
       starCount >= 3
         ? `${starCount} 名球员要求 STAR 角色，角色定位重叠`
-        : o1 - o2 <= 1 && o1 >= 84
+        : o1 - o2 <= 1 && o1 >= 87
           ? "两名实力接近的球星需要明确谁做第一选择"
           : "进攻层级清晰",
   });
 
   // 5) depth: slots 6-9 quality
   const bench = rotation.slice(4, 9).map((p) => p.ratings.overall);
-  const depth = avg(bench) * 1.15;
+  const depth = avg(bench) + 6;
   factors.push({
     key: "depth",
     label: "替补深度",
     score: Math.round(Math.min(100, depth)),
-    note: depth < 60 ? "替补质量薄弱，主力疲劳风险高" : depth > 74 ? "替补席能维持阵容强度" : "替补深度合格",
+    note: depth < 76 ? "替补质量薄弱，主力疲劳风险高" : depth > 84 ? "替补席能维持阵容强度" : "替补深度合格",
   });
 
   // 6) continuity: avg tenure, penalized if roster just churned

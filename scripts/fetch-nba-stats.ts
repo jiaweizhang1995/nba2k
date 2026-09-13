@@ -102,49 +102,64 @@ export interface ParsedPerGame {
 
 /** Parse the 2025-26 ({{nbay|2025}}) regular-season row from a player article. */
 export function parse2025_26Row(wikitext: string): ParsedPerGame | null {
-  // headings may or may not have padding spaces: "====Regular season====" /
-  // "==== Regular season ===="
+  // Preferred scope: the "====Regular season====" subsection (most articles).
+  // Many articles (e.g. traded stars) keep the NBA career table directly
+  // under "===NBA===" with no regular-season subheading — fall back to the
+  // career-statistics area, then the whole article. Row-level filters ({{nbay}}
+  // template + non-playoffs) keep the fallback safe.
+  const scopes: string[] = [];
   const rsMatch = /={4,5}\s*Regular season\s*={4,5}/.exec(wikitext);
-  if (!rsMatch) return null;
-  const rsStart = rsMatch.index;
-  const rest = wikitext.slice(rsStart + rsMatch[0].length);
-  const nextSection = rest.search(/={4,5}\s*[A-Za-z]/);
-  const section = nextSection === -1 ? rest : rest.slice(0, nextSection);
+  if (rsMatch) {
+    const rest = wikitext.slice(rsMatch.index + rsMatch[0].length);
+    const nextSection = rest.search(/={4,5}\s*[A-Za-z]/);
+    scopes.push(nextSection === -1 ? rest : rest.slice(0, nextSection));
+  }
+  const careerMatch = /={2,3}\s*Career statistics\s*={2,3}/.exec(wikitext);
+  if (careerMatch) scopes.push(wikitext.slice(careerMatch.index));
+  scopes.push(wikitext);
 
   const candidates: ParsedPerGame[] = [];
-  const rows = section.split("|-");
-  for (const rawRow of rows) {
-    if (!/\{\{\s*nbay\s*\|\s*2025\s*[\s|}]/.test(rawRow)) continue;
-    if (/playoffs/i.test(rawRow) && !/Regular/i.test(rawRow)) continue;
-    // substitutions first (templates/links contain "|"), THEN split cells
-    const cells = preprocessRow(rawRow)
-      .replace(/\|\|/g, "|")
-      .split("|")
-      .map((c) => c.replace(/\s+/g, " ").trim())
-      .filter((c) => c !== "");
-    const seasonIdx = cells.findIndex((c) => /^2025-26/.test(c));
-    if (seasonIdx === -1) continue;
-    const team = cells[seasonIdx + 1] ?? "?";
-    const stats = cells.slice(seasonIdx + 2);
-    if (stats.length < 11) continue;
-    const tail = stats.slice(-11).map(num);
-    const [gp, gs, mpg, fgPct, tpPct, ftPct, rpg, apg, spg, bpg, ppg] = tail as (number | null)[];
-    if (gp == null || mpg == null || ppg == null) continue;
-    candidates.push({
-      season: 2026,
-      teamRow: team,
-      g: gp,
-      gs: gs ?? null,
-      mpg,
-      fgPct: fgPct == null ? null : fgPct > 1 ? fgPct / 100 : fgPct,
-      tpPct: tpPct == null ? null : tpPct > 1 ? tpPct / 100 : tpPct,
-      ftPct: ftPct == null ? null : ftPct > 1 ? ftPct / 100 : ftPct,
-      rpg: rpg ?? 0,
-      apg: apg ?? 0,
-      spg: spg ?? 0,
-      bpg: bpg ?? 0,
-      ppg,
-    });
+  const seen = new Set<string>();
+  for (const section of scopes) {
+    const rows = section.split("|-");
+    for (const rawRow of rows) {
+      if (!/\{\{\s*nbay\s*\|\s*2025\s*[\s|}]/.test(rawRow)) continue;
+      if (/playoffs/i.test(rawRow) && !/Regular/i.test(rawRow)) continue;
+      // substitutions first (templates/links contain "|"), THEN split cells
+      const cells = preprocessRow(rawRow)
+        .replace(/\|\|/g, "|")
+        .split("|")
+        .map((c) => c.replace(/\s+/g, " ").trim())
+        .filter((c) => c !== "");
+      const seasonIdx = cells.findIndex((c) => /^2025-26/.test(c));
+      if (seasonIdx === -1) continue;
+      const dedup = cells.slice(seasonIdx).join("|");
+      if (seen.has(dedup)) continue;
+      const team = cells[seasonIdx + 1] ?? "?";
+      const stats = cells.slice(seasonIdx + 2);
+      if (stats.length < 11) continue;
+      const tail = stats.slice(-11).map(num);
+      const [gp, gs, mpg, fgPct, tpPct, ftPct, rpg, apg, spg, bpg, ppg] = tail as (number | null)[];
+      if (gp == null || mpg == null || ppg == null) continue;
+      seen.add(dedup);
+      candidates.push({
+        season: 2026,
+        teamRow: team,
+        g: gp,
+        gs: gs ?? null,
+        mpg,
+        fgPct: fgPct == null ? null : fgPct > 1 ? fgPct / 100 : fgPct,
+        tpPct: tpPct == null ? null : tpPct > 1 ? tpPct / 100 : tpPct,
+        ftPct: ftPct == null ? null : ftPct > 1 ? ftPct / 100 : ftPct,
+        rpg: rpg ?? 0,
+        apg: apg ?? 0,
+        spg: spg ?? 0,
+        bpg: bpg ?? 0,
+        ppg,
+      });
+    }
+    // The most specific matching scope wins: stop once any row was parsed.
+    if (candidates.length > 0) break;
   }
   if (candidates.length === 0) return null;
   // multi-team season: use the row with the most games (dominant team)

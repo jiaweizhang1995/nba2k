@@ -32,10 +32,10 @@ export function classifyTeamPhase(avgOverall: number, avgAge: number, wins: numb
 export function assignRoles(sortedOverall: { id: string; overall: number }[]): Record<string, string> {
   const out: Record<string, string> = {};
   sortedOverall.forEach((p, i) => {
-    if (i === 0 && p.overall >= 78) out[p.id] = "STAR";
-    else if (i === 1 && p.overall >= 76) out[p.id] = "STAR";
+    if (i === 0 && p.overall >= 86) out[p.id] = "STAR";
+    else if (i === 1 && p.overall >= 84) out[p.id] = "STAR";
     else if (i < 5) out[p.id] = "STARTER";
-    else if (i === 5 && p.overall >= 68) out[p.id] = "SIXTH_MAN";
+    else if (i === 5 && p.overall >= 79) out[p.id] = "SIXTH_MAN";
     else if (i < 10) out[p.id] = "ROTATION";
     else out[p.id] = "BENCH";
   });

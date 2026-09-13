@@ -2,10 +2,10 @@
 // development, awards. Pure functions over a plain LeagueState — no DB here.
 
 import { rngFor } from "../rng";
-import { simulateGame, type SimPlayer } from "./game";
+import { simulateGame, type SimPlayer, type RotationConfig } from "./game";
 import type { SeasonPhase, GameType } from "../types";
 
-export const SEASON_SIM_VERSION = "SEASON-SIM v1.0";
+export const SEASON_SIM_VERSION = "SEASON-SIM v2.0";
 
 export interface LeagueTeam {
   id: string;
@@ -83,10 +83,18 @@ export interface LeagueState {
   players: LeaguePlayer[];
   games: LeagueGame[];
   playoffs: PlayoffState | null;
+  /** Manager-set rotation per team id (starters + minute targets). Optional: absent = auto rotation. */
+  rotation?: Record<string, RotationConfig>;
 }
 
 export const SEASON_START_MONTH_DAY = "-10-21";
 export const SEASON_GAMES_PER_TEAM = 82;
+/** Max games vs a single opponent in a regular season. */
+export const SEASON_MAX_MEETINGS = 4;
+/** Rest days required between a team's consecutive games (1 = no B2B). */
+export const SEASON_MIN_REST_DAYS = 2;
+/** Max consecutive home or away games before a venue flip is forced. */
+export const SEASON_MAX_HOME_AWAY_STREAK = 3;
 
 function isoAddDays(iso: string, days: number): string {
   const d = new Date(iso + "T00:00:00Z");
@@ -94,75 +102,150 @@ function isoAddDays(iso: string, days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-/** Deterministic 82-game schedule for 30 teams via circle method + extras. */
+/**
+ * Deterministic 82-game schedule for 30 teams.
+ * Every pair meets twice (58 games); the remaining 24 per team go to 12
+ * seeded same-conference rivals (→ 4 meetings), keeping ≤4 vs any opponent.
+ * Games are placed greedily day-by-day with hard constraints: no back-to-backs
+ * (≥1 rest day), ≤3 consecutive home/away games, one game per team per day.
+ */
 export function createSchedule(state: LeagueState): LeagueGame[] {
   const rng = rngFor(state.seed, `schedule:${state.season}`);
   const teamIds = state.teams.map((t) => t.id);
   if (teamIds.length % 2 !== 0) throw new Error("schedule requires even team count");
-  const n = teamIds.length;
 
-  // Circle method rounds: each team plays every other once (n-1 rounds).
-  const rotation = [...teamIds];
-  const rounds: { home: string; away: string }[][] = [];
-  for (let r = 0; r < n - 1; r++) {
-    const pairs: { home: string; away: string }[] = [];
-    for (let i = 0; i < n / 2; i++) {
-      const a = rotation[i];
-      const b = rotation[n - 1 - i];
-      if (r % 2 === 0) pairs.push({ home: a, away: b });
-      else pairs.push({ home: b, away: a });
+  // --- Build the pairing multiset ---
+  const confOf = new Map(state.teams.map((t) => [t.id, t.conference]));
+  const pairCount = new Map<string, number>();
+  const key = (a: string, b: string) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+  const addPair = (a: string, b: string, n: number) => pairCount.set(key(a, b), (pairCount.get(key(a, b)) ?? 0) + n);
+  for (let i = 0; i < teamIds.length; i++) {
+    for (let j = i + 1; j < teamIds.length; j++) {
+      addPair(teamIds[i], teamIds[j], 2); // base: everyone home & away
     }
-    rounds.push(pairs);
-    rotation.splice(1, 0, rotation.pop()!);
   }
-  // Reversed home/away: another n-1 rounds.
-  for (const pairs of rounds.slice(0, n - 1)) {
-    rounds.push(pairs.map((p) => ({ home: p.away, away: p.home })));
-  }
-  // Extra rounds to reach 82 games per team: 82/2 = 41 halves; 2*(n-1) rounds
-  // already give 58 games/team, so add SEASON_GAMES_PER_TEAM - 2*(n-1) more.
-  const extraRounds = SEASON_GAMES_PER_TEAM - 2 * (n - 1);
-  for (let r = 0; r < extraRounds; r++) {
-    const shuffled = rng.shuffle(teamIds);
-    const pairs: { home: string; away: string }[] = [];
-    for (let i = 0; i < n / 2; i++) {
-      const a = shuffled[i];
-      const b = shuffled[n - 1 - i];
-      if (r % 2 === 0) pairs.push({ home: a, away: b });
-      else pairs.push({ home: b, away: a });
+  // Extras: +2 games vs 12 of 14 same-conference rivals → 4 meetings, while a
+  // seeded 2-regular ring of rivals stays at 2. Every team gets exactly 24
+  // extra games (12 rivals × 2), keeping ≤4 meetings vs any opponent.
+  for (const conf of ["EAST", "WEST"] as const) {
+    const confTeams = rng.shuffle(teamIds.filter((t) => confOf.get(t) === conf));
+    const n = confTeams.length; // 15
+    for (let i = 0; i < n; i++) {
+      for (let d = 2; d <= Math.floor(n / 2); d++) {
+        addPair(confTeams[i], confTeams[(i + d) % n], 2);
+      }
     }
-    rounds.push(pairs);
   }
 
+  // --- Greedy day-by-day placement ---
   const startDate = `${state.season - 1}${SEASON_START_MONTH_DAY}`;
-  const busy = new Map<string, Set<string>>(); // date -> teamIds playing that day
-  const teamFree = (date: string, teamId: string) => {
-    const set = busy.get(date);
-    return !set || !set.has(teamId);
-  };
-  const mark = (date: string, a: string, b: string) => {
-    if (!busy.has(date)) busy.set(date, new Set());
-    busy.get(date)!.add(a);
-    busy.get(date)!.add(b);
-  };
-
+  const lastGameDay = new Map<string, number>(teamIds.map((t) => [t, -99]));
+  const homeCount = new Map<string, number>(teamIds.map((t) => [t, 0]));
+  const venueRun = new Map<string, { dir: "H" | "A"; len: number }>(teamIds.map((t) => [t, { dir: "H", len: 0 }]));
   const out: LeagueGame[] = [];
   let gi = 0;
   let day = 0;
-  for (const pairs of rounds) {
-    for (const p of rng.shuffle(pairs)) {
-      let offset = day;
-      for (;;) {
-        const date = isoAddDays(startDate, offset);
-        if (teamFree(date, p.home) && teamFree(date, p.away)) {
-          mark(date, p.home, p.away);
+  let stallDays = 0;
+  let gapMin = SEASON_MIN_REST_DAYS;
+  let maxStreak = SEASON_MAX_HOME_AWAY_STREAK;
+
+  const canPlay = (t: string, d: number) => lastGameDay.get(t)! <= d - gapMin;
+  const venueOk = (t: string, dir: "H" | "A") => {
+    const v = venueRun.get(t)!;
+    return !(v.dir === dir && v.len >= maxStreak);
+  };
+  const applyVenue = (t: string, dir: "H" | "A") => {
+    const v = venueRun.get(t)!;
+    venueRun.set(t, v.dir === dir ? { dir, len: v.len + 1 } : { dir, len: 1 });
+    if (dir === "H") homeCount.set(t, homeCount.get(t)! + 1);
+  };
+
+  const pairs = [...pairCount.entries()];
+  void pairs;
+  for (;;) {
+    let remainingTotal = 0;
+    for (const c of pairCount.values()) remainingTotal += c;
+    if (remainingTotal === 0) break;
+    // Rebuild the live list each day: decremented counts must be respected.
+    const live: [string, number][] = [];
+    for (const [pk, c] of pairCount) if (c > 0) live.push([pk, c]);
+    const order = rng.shuffle(live);
+    let played = 0;
+    // Cap games per day so the league doesn't lock into a perfect
+    // every-other-day bipartite rhythm (which can deadlock residue pairs).
+    const dayCap = 6 + rng.int(0, 6);
+    const usedToday = new Set<string>();
+    for (const [pk, count] of order) {
+      if (count <= 0) continue;
+      if (played >= dayCap) break;
+      const [a, b] = pk.split("|");
+      if (usedToday.has(a) || usedToday.has(b)) continue;
+      if (!canPlay(a, day) || !canPlay(b, day)) continue;
+      // Direction: the team with fewer home games hosts; respect streak caps.
+      let home: string;
+      let away: string;
+      if (homeCount.get(a)! <= homeCount.get(b)! && venueOk(a, "H") && venueOk(b, "A")) {
+        home = a;
+        away = b;
+      } else if (venueOk(b, "H") && venueOk(a, "A")) {
+        home = b;
+        away = a;
+      } else continue;
+      out.push({
+        id: `g-${state.season}-${gi++}`,
+        date: isoAddDays(startDate, day),
+        season: state.season,
+        type: "REGULAR",
+        homeTeamId: home,
+        awayTeamId: away,
+        homeScore: null,
+        awayScore: null,
+        status: "SCHEDULED",
+        box: null,
+        round: null,
+        seriesId: null,
+        gameNo: null,
+      });
+      pairCount.set(pk, count - 1);
+      lastGameDay.set(a, day);
+      lastGameDay.set(b, day);
+      applyVenue(home, "H");
+      applyVenue(away, "A");
+      usedToday.add(a);
+      usedToday.add(b);
+      played++;
+    }
+    if (played === 0) {
+      stallDays++;
+      // Emergency relax (should never trigger in practice): allow B2B, then
+      // loosen venue streaks, so schedule generation always terminates.
+      if (stallDays % 10 === 0 && gapMin > 1) gapMin = 1;
+      if (stallDays % 25 === 0) maxStreak += 1;
+    } else {
+      stallDays = 0;
+      gapMin = SEASON_MIN_REST_DAYS;
+      maxStreak = SEASON_MAX_HOME_AWAY_STREAK;
+    }
+    day++;
+    if (day > 240) {
+      // Fallback: place remaining pairs directly at the first date where both
+      // teams have rested enough (venue streaks relaxed) — always terminates.
+      for (const [pk, count] of [...pairCount.entries()]) {
+        for (let k = 0; k < count; k++) {
+          const [a, b] = pk.split("|");
+          let d = Math.max(lastGameDay.get(a)! + gapMin, lastGameDay.get(b)! + gapMin, day);
+          for (; d < day + 400; d++) {
+            if (lastGameDay.get(a)! <= d - gapMin && lastGameDay.get(b)! <= d - gapMin) break;
+          }
+          const home = homeCount.get(a)! <= homeCount.get(b)! ? a : b;
+          const away = home === a ? b : a;
           out.push({
             id: `g-${state.season}-${gi++}`,
-            date,
+            date: isoAddDays(startDate, d),
             season: state.season,
             type: "REGULAR",
-            homeTeamId: p.home,
-            awayTeamId: p.away,
+            homeTeamId: home,
+            awayTeamId: away,
             homeScore: null,
             awayScore: null,
             status: "SCHEDULED",
@@ -171,12 +254,16 @@ export function createSchedule(state: LeagueState): LeagueGame[] {
             seriesId: null,
             gameNo: null,
           });
-          break;
+          lastGameDay.set(a, d);
+          lastGameDay.set(b, d);
+          applyVenue(home, "H");
+          applyVenue(away, "A");
+          pairCount.set(pk, pairCount.get(pk)! - 1);
         }
-        offset++;
       }
+      break;
     }
-    day += 2; // roughly one round every two calendar days
+    if (day > 400) throw new Error("schedule generation failed to converge");
   }
   return out;
 }
@@ -242,8 +329,8 @@ function simAndApply(state: LeagueState, g: LeagueGame, report: DayReport) {
   const backToBackHome = state.games.some((x) => x.status === "FINAL" && x.date === isoAddDays(state.currentDate, -1) && (x.homeTeamId === home.id || x.awayTeamId === home.id));
   const backToBackAway = state.games.some((x) => x.status === "FINAL" && x.date === isoAddDays(state.currentDate, -1) && (x.homeTeamId === away.id || x.awayTeamId === away.id));
   const result = simulateGame(
-    { id: home.id, name: home.name, players: homePlayers.map(toSimPlayer) },
-    { id: away.id, name: away.name, players: awayPlayers.map(toSimPlayer) },
+    { id: home.id, name: home.name, players: homePlayers.map(toSimPlayer), config: state.rotation?.[home.id] ?? null },
+    { id: away.id, name: away.name, players: awayPlayers.map(toSimPlayer), config: state.rotation?.[away.id] ?? null },
     {
       seed: state.seed,
       salt: `game:${g.id}:${g.date}`,
@@ -293,13 +380,14 @@ function simAndApply(state: LeagueState, g: LeagueGame, report: DayReport) {
     p.stamina = Math.max(0.45, p.stamina - l.mp / 600);
   }
 
-  // Injuries: per team per game, weighted by minutes and age.
+  // Injuries: per team per game, weighted by minutes, age — and fatigue
+  // (tired bodies break down more often).
   const injRng = rngFor(state.seed, `injury:${g.id}`);
   for (const teamPlayers of [homePlayers, awayPlayers]) {
     if (!injRng.chance(0.16)) continue;
     const candidates = teamPlayers.filter((p) => p.status === "ACTIVE");
     if (!candidates.length) continue;
-    const victim = injRng.weighted(candidates, (p) => (p.age / 26) * Math.pow(Math.max(20, p.ratings.overall) / 55, 1.5));
+    const victim = injRng.weighted(candidates, (p) => (p.age / 26) * Math.pow(Math.max(20, p.ratings.overall) / 55, 1.5) * (1.5 - 0.5 * p.stamina));
     const roll = injRng.next();
     const severity = roll < 0.68 ? "MINOR" : roll < 0.92 ? "MODERATE" : "SEVERE";
     const weeks = severity === "MINOR" ? injRng.int(1, 2) : severity === "MODERATE" ? injRng.int(3, 6) : injRng.int(7, 14);
@@ -314,16 +402,20 @@ function simAndApply(state: LeagueState, g: LeagueGame, report: DayReport) {
 }
 
 function tickDaily(state: LeagueState, report: DayReport) {
+  const yesterday = isoAddDays(state.currentDate, -1);
   for (const p of state.players) {
-    // fatigue recovery
-    if (p.lastGameDate !== state.currentDate) p.stamina = Math.min(1, p.stamina + 0.25);
+    // fatigue recovery: only if the player did NOT play yesterday (no b2b recovery)
+    if (p.lastGameDate !== yesterday && p.lastGameDate !== state.currentDate) p.stamina = Math.min(1, p.stamina + 0.25);
     // injury countdown
     if (p.injury && p.injury.weeksRemaining > 0) {
       p.injury.weeksRemaining -= 1 / 7; // day-based countdown in weeks
       if (p.injury.weeksRemaining <= 0) {
         p.injury = null;
         if (p.status === "INJURED") p.status = "ACTIVE";
-        report.notes.push(`${p.name} 伤愈复出`);
+        // Returning from injury: rusty — reduced stamina limits minutes and
+        // sharpness until daily recovery rebuilds it (~2 days per 0.5).
+        p.stamina = Math.min(p.stamina, 0.55);
+        report.notes.push(`${p.name} 伤愈复出（身体状态仅恢复约 55%，建议逐步加回轮换时间）`);
       }
     }
   }

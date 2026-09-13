@@ -8,7 +8,14 @@ export const createSaveSchema = z.object({
 });
 
 export const advanceSchema = z.object({
-  mode: z.enum(["DAY", "WEEK", "MONTH", "REGULAR_SEASON", "PLAYOFFS", "SEASON"]),
+  mode: z.enum(["NEXT_GAME", "DAY", "WEEK", "MONTH", "REGULAR_SEASON", "PLAYOFFS", "SEASON"]),
+});
+
+export const rotationSchema = z.object({
+  teamId: z.string().min(1),
+  starters: z.array(z.string().min(1)).length(5).optional(),
+  minutes: z.record(z.string(), z.number().min(0).max(48)).optional(),
+  reset: z.boolean().optional(),
 });
 
 export const tradeSchema = z.object({

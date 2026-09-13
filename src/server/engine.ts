@@ -281,7 +281,7 @@ function classifyTeamPhases(saveId: string) {
     const avgOverall = pool.reduce((a, p) => a + p.ratings.overall, 0) / Math.max(1, pool.length);
     // classifyTeamPhase keys off win% which is meaningless at 0-0 (every
     // fresh team would land in BUBBLE); tier on roster strength instead.
-    const phase = (avgOverall >= 68 ? "CONTENDER" : avgOverall >= 64 ? "PLAYOFF" : avgOverall >= 59 ? "BUBBLE" : "REBUILD") as
+    const phase = (avgOverall >= 78 ? "CONTENDER" : avgOverall >= 75 ? "PLAYOFF" : avgOverall >= 72 ? "BUBBLE" : "REBUILD") as
       | "CONTENDER"
       | "PLAYOFF"
       | "BUBBLE"
@@ -423,6 +423,7 @@ export function loadLeagueState(saveId: string, opts: { includeGames?: boolean }
     players,
     games,
     playoffs: ((save.phaseState as Record<string, unknown> | null)?.playoffs as LeagueState["playoffs"]) ?? null,
+    rotation: ((save.phaseState as Record<string, unknown> | null)?.rotation as LeagueState["rotation"]) ?? {},
   };
 }
 
@@ -522,7 +523,20 @@ export function persistState(state: LeagueState, extra?: { phaseState?: Record<s
 // Simulation advancement
 // ---------------------------------------------------------------------------
 
-export type AdvanceMode = "DAY" | "WEEK" | "MONTH" | "REGULAR_SEASON" | "PLAYOFFS" | "SEASON";
+export type AdvanceMode = "NEXT_GAME" | "DAY" | "WEEK" | "MONTH" | "REGULAR_SEASON" | "PLAYOFFS" | "SEASON";
+
+export interface UserGameSummary {
+  gameId: string;
+  date: string;
+  home: boolean;
+  opponent: string; // abbr
+  myScore: number;
+  oppScore: number;
+  win: boolean;
+  ot: boolean;
+  topPerformers: { name: string; team: string; pts: number; reb: number; ast: number; mp: number }[];
+  keyReasons: string[];
+}
 
 export interface AdvanceResult {
   days: number;
@@ -533,7 +547,12 @@ export interface AdvanceResult {
   champion: string | null;
   notes: string[];
   awards: { type: string; player: string | null; team: string | null }[];
+  /** NEXT_GAME 专属：用户球队比赛摘要（结果 → 伤病 → 事件 → 原因的展示顺序在 UI 层） */
+  userGames?: UserGameSummary[];
+  fatigueChanges?: { name: string; from: number; to: number }[];
 }
+
+const shortId = (full: string) => full.split(":").slice(1).join(":");
 
 export function advanceSim(saveId: string, mode: AdvanceMode): AdvanceResult {
   const save = getSave(saveId);
@@ -543,12 +562,21 @@ export function advanceSim(saveId: string, mode: AdvanceMode): AdvanceResult {
   }
 
   const state = loadLeagueState(saveId);
+  const phaseState = getPhaseState(saveId);
+  const userTeamId = phaseState.userTeamId ? shortId(String(phaseState.userTeamId)) : null;
   const maxDays =
-    mode === "DAY" ? 1 : mode === "WEEK" ? 7 : mode === "MONTH" ? 30 : mode === "REGULAR_SEASON" ? 240 : mode === "PLAYOFFS" ? 120 : 420;
+    mode === "NEXT_GAME" ? 10 : mode === "DAY" ? 1 : mode === "WEEK" ? 7 : mode === "MONTH" ? 30 : mode === "REGULAR_SEASON" ? 240 : mode === "PLAYOFFS" ? 120 : 420;
 
-  const result: AdvanceResult = { days: 0, gamesPlayed: 0, results: [], injuries: [], phaseChanged: null, champion: null, notes: [], awards: [] };
+  const result: AdvanceResult = { days: 0, gamesPlayed: 0, results: [], injuries: [], phaseChanged: null, champion: null, notes: [], awards: [], userGames: [], fatigueChanges: [] };
   const startPhase = state.phase;
 
+  // Fatigue snapshot for the user's roster (NEXT_GAME reports stamina deltas).
+  const staminaBefore = new Map<string, number>();
+  if (mode === "NEXT_GAME" && userTeamId) {
+    for (const p of state.players.filter((x) => x.teamId === userTeamId)) staminaBefore.set(p.id, p.stamina);
+  }
+
+  const playedGameIds: string[] = [];
   for (let i = 0; i < maxDays; i++) {
     if (mode === "REGULAR_SEASON" && state.phase !== "REGULAR_SEASON") break;
     if (mode === "PLAYOFFS" && state.phase !== "PLAYOFFS") break;
@@ -559,8 +587,53 @@ export function advanceSim(saveId: string, mode: AdvanceMode): AdvanceResult {
     result.results.push(...report.results.map((r) => ({ ...r, date: report.date })));
     result.injuries.push(...report.injuries);
     result.notes.push(...report.notes);
+    playedGameIds.push(...report.results.map((r) => r.gameId));
+    if (mode === "NEXT_GAME" && userTeamId) {
+      const userPlayed = report.results.some((r) => {
+        const g = state.games.find((x) => x.id === r.gameId);
+        return g && (g.homeTeamId === userTeamId || g.awayTeamId === userTeamId);
+      });
+      if (userPlayed) break;
+    }
   }
   result.phaseChanged = state.phase !== startPhase ? state.phase : null;
+
+  // User-team game summaries (box score → top performers + key reasons).
+  if (userTeamId) {
+    const teamsById = new Map(state.teams.map((t) => [t.id, t]));
+    for (const gid of playedGameIds) {
+      const g = state.games.find((x) => x.id === gid);
+      if (!g || g.status !== "FINAL" || (g.homeTeamId !== userTeamId && g.awayTeamId !== userTeamId)) continue;
+      const home = g.homeTeamId === userTeamId;
+      const box = g.box as { home?: { name: string; teamId: string; pts: number; reb: number; ast: number; mp: number }[]; away?: { name: string; teamId: string; pts: number; reb: number; ast: number; mp: number }[]; notes?: string[] } | null;
+      const myScore = (home ? g.homeScore : g.awayScore) ?? 0;
+      const oppScore = (home ? g.awayScore : g.homeScore) ?? 0;
+      const allLines = [...(box?.home ?? []), ...(box?.away ?? [])];
+      const topPerformers = allLines
+        .sort((a, b) => b.pts - a.pts)
+        .slice(0, 3)
+        .map((l) => ({ name: l.name, team: teamsById.get(l.teamId)?.abbr ?? "", pts: l.pts, reb: l.reb, ast: l.ast, mp: l.mp }));
+      result.userGames!.push({
+        gameId: g.id,
+        date: g.date,
+        home,
+        opponent: teamsById.get(home ? g.awayTeamId : g.homeTeamId)?.abbr ?? "?",
+        myScore,
+        oppScore,
+        win: myScore > oppScore,
+        ot: (box?.notes ?? []).some((n) => n.includes("加时")),
+        topPerformers,
+        keyReasons: (box?.notes ?? []).slice(0, 4),
+      });
+    }
+    for (const p of state.players.filter((x) => x.teamId === userTeamId)) {
+      const from = staminaBefore.get(p.id);
+      if (from != null && Math.abs(from - p.stamina) >= 0.05) {
+        result.fatigueChanges!.push({ name: p.name, from: Math.round(from * 100), to: Math.round(p.stamina * 100) });
+      }
+    }
+    result.fatigueChanges!.sort((a, b) => a.to - b.to);
+  }
 
   // Playoffs may have crowned a champion within the loop.
   let champion: string | null = null;
@@ -613,7 +686,7 @@ function recordAwards(state: LeagueState, champion: string | null): AdvanceResul
       tx.insert(awardsT).values({ id: uuid(), saveId: state.saveId, season: state.season, type: "DPOY", playerId: `${state.saveId}:${dpoy.id}`, teamId: dpoy.teamId ? `${state.saveId}:${dpoy.teamId}` : null, detail: null }).run();
       out.push({ type: "DPOY", player: dpoy.name, team: null });
     }
-    const roy = best((p) => (p.yearsPro <= 1 && p.ratings.overall >= 55 ? seasonScore(p) : -1));
+    const roy = best((p) => (p.yearsPro <= 1 && p.ratings.overall >= 70 ? seasonScore(p) : -1));
     if (roy && roy.yearsPro <= 1) {
       tx.insert(awardsT).values({ id: uuid(), saveId: state.saveId, season: state.season, type: "ROY", playerId: `${state.saveId}:${roy.id}`, teamId: roy.teamId ? `${state.saveId}:${roy.teamId}` : null, detail: null }).run();
       out.push({ type: "ROY", player: roy.name, team: null });
@@ -641,13 +714,13 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
     if (end >= newSeason || !p.teamId) continue;
     const rng = rngFor(state.seed, `resign:${state.season}:${p.id}`);
     const overall = p.ratings.overall;
-    const keepProb = overall >= 80 ? 0.9 : overall >= 70 ? 0.8 : 0.62;
+    const keepProb = overall >= 85 ? 0.9 : overall >= 72 ? 0.8 : 0.62;
     if (rng.chance(keepProb)) {
       const raise = 1.08;
       const newYears = rng.int(2, 4);
       const base = Math.max(CBA.minimumSalary, Math.round(((p.contract.years[0]?.salary ?? 5) * raise) * 10) / 10);
       p.contract = {
-        type: overall >= 82 ? "MAX" : "VETERAN",
+        type: overall >= 86 ? "MAX" : "VETERAN",
         years: Array.from({ length: newYears }, (_, i) => ({ season: newSeason + i, salary: Math.round(base * (1 + i * 0.05) * 10) / 10 })),
       } as LeaguePlayer["contract"];
       resigned++;
@@ -898,7 +971,7 @@ export function executeTrade(saveId: string, parties: TradeParty[], opts: { godM
       const roster = tx.select().from(playersT).where(and(eq(playersT.saveId, saveId), eq(playersT.teamId, `${saveId}:${party.teamId}`))).all();
       const sorted = [...roster].sort((a, b) => b.ratings.overall - a.ratings.overall);
       sorted.forEach((p, i) => {
-        const role = i === 0 && p.ratings.overall >= 78 ? "STAR" : i === 1 && p.ratings.overall >= 76 ? "STAR" : i < 5 ? "STARTER" : i === 5 && p.ratings.overall >= 68 ? "SIXTH_MAN" : i < 10 ? "ROTATION" : "BENCH";
+        const role = i === 0 && p.ratings.overall >= 86 ? "STAR" : i === 1 && p.ratings.overall >= 84 ? "STAR" : i < 5 ? "STARTER" : i === 5 && p.ratings.overall >= 79 ? "SIXTH_MAN" : i < 10 ? "ROTATION" : "BENCH";
         const newSat = Math.max(20, Math.min(95, p.satisfaction - (p.role !== role ? 6 : 0)));
         tx.update(playersT).set({ role, satisfaction: newSat }).where(eq(playersT.id, p.id)).run();
       });

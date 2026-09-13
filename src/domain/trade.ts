@@ -67,8 +67,8 @@ export function ageMultiplier(age: number): number {
  * 位置溢价封顶 +25%。
  */
 export function needPremium(team: TradeTeam, p: TradePlayer): number {
-  const isStar = p.role === "STAR" || p.ratings.overall >= 70;
-  if (!isStar && p.ratings.overall < 60) return 0;
+  const isStar = p.role === "STAR" || p.ratings.overall >= 84;
+  if (!isStar && p.ratings.overall < 74) return 0;
   let premium = 0;
   if (isStar) {
     premium +=
@@ -84,7 +84,7 @@ export function needPremium(team: TradeTeam, p: TradePlayer): number {
 
 export function playerValue(p: TradePlayer, season: number): Valuation {
   const r = p.ratings;
-  const base = Math.pow(Math.max(0, r.overall - 40), 1.55);
+  const base = Math.pow(Math.max(0, r.overall - 58), 1.55);
   let v = base * 0.9;
   if (r.potential != null && p.age <= 24) {
     v += Math.max(0, r.potential - r.overall) * 2.4; // upside premium
@@ -93,7 +93,7 @@ export function playerValue(p: TradePlayer, season: number): Valuation {
 
   // Contract value: cheap production is worth more; albatross discounts.
   const salary = salaryForSeason(p.contract, 0);
-  const productionPerM = salary > 0 ? (r.overall - 45) / salary : 2;
+  const productionPerM = salary > 0 ? (r.overall - 65) / salary : 2;
   let contractNote = "";
   if (productionPerM < 0.15) {
     v *= 0.85;

@@ -397,7 +397,7 @@ function toolSignFreeAgent(
       .from(playersT)
       .where(and(eq(playersT.saveId, evalRow.saveId), eq(playersT.status, "FREE_AGENT")))
       .all()
-      .filter((p) => p.ratings.overall >= 55)
+      .filter((p) => p.ratings.overall >= 70)
       .sort((a, b) => a.ratings.overall - b.ratings.overall || a.age - b.age);
     if (!fas.length) return { summary: "自由市场无合适目标（综合 ≥ 55）", isAction: true, legal: true };
     const pickFas = fas[fas.length - 1];

@@ -76,6 +76,35 @@ async function main() {
   const existing: Record<string, unknown> = fs.existsSync(outPath)
     ? JSON.parse(fs.readFileSync(outPath, "utf8"))
     : {};
+  // --verify: 重新校验已缓存合同的身份（espnId 的 displayName 必须与球员姓名
+  // 词元重叠），删除错配记录以便重新匹配。
+  if (process.argv.includes("--verify")) {
+    const nameByExt = new Map(payload.players.map((p) => [p.externalId, p.name]));
+    let removed = 0;
+    for (const [extId, rec] of Object.entries(existing)) {
+      const espnId = (rec as { espnId?: string } | null)?.espnId;
+      const playerName = nameByExt.get(extId);
+      if (!espnId || !playerName) continue;
+      try {
+        const a = curlJson(`https://sports.core.api.espn.com/v2/sports/basketball/leagues/nba/athletes/${espnId}`) as { displayName?: string };
+        const key = tokenKey(playerName);
+        const tokens = new Set(key.split(" "));
+        const real = tokenKey(a.displayName ?? "");
+        const overlap = real.split(" ").filter((t) => tokens.has(t)).length;
+        if (!real || overlap === 0) {
+          console.log(`✕ 身份不符：${playerName} → espnId ${espnId} 是 ${a.displayName ?? "?"}，删除合同记录`);
+          delete existing[extId];
+          removed++;
+        }
+        await sleep(200);
+      } catch {
+        /* 无法校验时保留 */
+      }
+    }
+    fs.writeFileSync(outPath, JSON.stringify(existing, null, 1));
+    console.log(`--verify 完成：删除 ${removed} 条错配合同`);
+    return;
+  }
 
   const byAbbr = new Map<string, typeof payload.players>();
   for (const p of payload.players) {
@@ -106,9 +135,29 @@ async function main() {
       }
       const pJersey = p.jersey != null ? String(p.jersey) : null;
       const pKey = tokenKey(p.name);
-      // pass 1: team + jersey number; pass 2: team + token-set name
-      let hit = espnAthletes.find((a) => !usedEspn.has(a.id) && pJersey && a.jersey === pJersey);
-      if (!hit) hit = espnAthletes.find((a) => !usedEspn.has(a.id) && tokenKey(a.displayName) === pKey);
+      const pTokens = new Set(pKey.split(" "));
+      // Identity-first matching: an exact token-set name match wins. Jersey
+      // number alone is NEVER enough — jerseys collide within a roster and
+      // especially across trades (LaMelo Ball → Terrence Shannon Jr. bug).
+      const nameOf = (a: EspnAthlete) => tokenKey(a.displayName);
+      const tokenOverlap = (a: EspnAthlete) => {
+        const t = nameOf(a).split(" ");
+        return t.filter((x) => pTokens.has(x)).length / Math.max(1, t.length);
+      };
+      let hit = espnAthletes.find((a) => !usedEspn.has(a.id) && pKey && nameOf(a) === pKey);
+      if (!hit) {
+        // Fall back to jersey number, but only when the name shares at least
+        // one token (nickname/abbreviation variants like "Nickeil" ↔ "Naw").
+        hit = espnAthletes.find((a) => !usedEspn.has(a.id) && pJersey && a.jersey === pJersey && tokenOverlap(a) > 0);
+      }
+      if (!hit && pJersey) {
+        // Last resort: same-team jersey match with NO name overlap — record
+        // it explicitly as unverified instead of silently trusting it.
+        const candidate = espnAthletes.find((a) => !usedEspn.has(a.id) && a.jersey === pJersey);
+        if (candidate) {
+          console.log(`   ⚠ ${p.name}（#${pJersey}）按球衣号只找到 ${candidate.displayName}，姓名不符 → 保持未匹配`);
+        }
+      }
       if (hit) {
         usedEspn.add(hit.id);
         matches.set(p.externalId, { espnId: hit.id, name: p.name });

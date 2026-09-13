@@ -54,6 +54,7 @@ function AssetList({
 }) {
   const [sortKey, setSortKey] = useState<"overall" | "salary" | "age">("overall");
   const data = rosters.get(teamId);
+  if (!teamId) return <div className="text-[12px] text-[var(--text-dim)]">{side === "get" ? "先在上方选择交易伙伴。" : "加载中…"}</div>;
   if (!data) return <div className="text-[12px] text-[var(--text-dim)]">加载中…</div>;
   if (kind === "players") {
     const sorted = [...data.players].sort((a, b) =>
@@ -247,9 +248,9 @@ export default function TradePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [saveId, partnerId, give, get]);
 
-  const fetchOffers = async () => {
+  const fetchOffers = async (silent = false) => {
     setOffersBusy(true);
-    setOffers(null);
+    if (!silent) setOffers(null);
     try {
       const gives = [
         ...give.players.map((id) => ({ kind: "PLAYER" as const, id })),
@@ -260,13 +261,25 @@ export default function TradePage() {
         body: JSON.stringify({ gives }),
       });
       setOffers(j.offers);
-      if (j.offers.length === 0) setToast({ msg: "没有球队对这份送出包感兴趣，试着调整资产组合。", kind: "err" });
+      if (j.offers.length === 0 && !silent) setToast({ msg: "没有球队对这份送出包感兴趣，试着调整资产组合。", kind: "err" });
     } catch (e) {
-      setToast({ msg: (e as Error).message, kind: "err" });
+      if (!silent) setToast({ msg: (e as Error).message, kind: "err" });
     } finally {
       setOffersBusy(false);
     }
   };
+
+  // 送出资产变化后自动征集报价（NBA 2K 式询价），600ms 防抖。
+  const giveCount = give.players.length + give.picks.length;
+  useEffect(() => {
+    if (!saveId || giveCount === 0) {
+      setOffers(null);
+      return;
+    }
+    const timer = setTimeout(() => void fetchOffers(true), 600);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saveId, giveCount, give.players.join(","), give.picks.join(",")]);
 
   const adoptOffer = (o: OfferItem) => {
     setPartnerId(o.teamId);
@@ -337,7 +350,7 @@ export default function TradePage() {
       </div>
 
       <div className="grid lg:grid-cols-2 gap-4">
-        <Section title="你送出（Give）">
+        <Section title="你送出（Give）— 勾选后自动向全联盟询价">
           <div className="space-y-3">
             <AssetList teamId={userTeamId} side="give" kind="players" rosters={rosters} selectedIds={give.players} onToggle={toggle} />
             <div className="text-[12px] text-[var(--text-dim)]">选秀权</div>
@@ -353,19 +366,50 @@ export default function TradePage() {
         </Section>
       </div>
 
-      <Section title="征集报价（向全联盟询价）">
-        <div className="flex items-center gap-3 flex-wrap mb-3">
-          <span className="text-[12px] text-[var(--text-dim)]">勾选左侧「你送出」的球员/选秀权，联盟中感兴趣的球队会给出具体报价，可直接采用。</span>
-          <button
-            className="btn btn-primary"
-            onClick={fetchOffers}
-            disabled={busy || offersBusy || give.players.length + give.picks.length === 0}
-            title={give.players.length + give.picks.length === 0 ? "先在左侧勾选要送出的资产" : "向 29 支球队征集报价"}
-          >
-            {offersBusy ? "征集中…" : "向全联盟征集报价"}
+      {/* 可行性即时反馈：阻断原因优先，CBA 细节折叠 */}
+      {validation && (
+        <Section title="这笔交易能成立吗？">
+          <div className="space-y-2">
+            <div className={`text-[14px] font-semibold ${validation.legal ? "text-[var(--good)]" : "text-[var(--bad)]"}`}>
+              {validation.legal ? "✓ 规则校验通过，可以执行" : "✕ 无法成交 — 先解决以下阻断项"}
+            </div>
+            {validation.issues.filter((i) => i.severity === "BLOCKER").map((i, idx) => (
+              <div key={idx} className="px-3 py-2 rounded text-[12px] bg-[#450a0a] text-[#fca5a5]">
+                {i.message}
+              </div>
+            ))}
+            {validation.issues.filter((i) => i.severity !== "BLOCKER").map((i, idx) => (
+              <div key={idx} className="px-3 py-2 rounded text-[12px] bg-[#451a03] text-[#fcd34d]">
+                ⚠ {i.message}
+              </div>
+            ))}
+            <details className="text-[12px] text-[var(--text-dim)]">
+              <summary className="cursor-pointer select-none">薪资配平明细（完整 CBA 说明）</summary>
+              <div className="space-y-1.5 mt-2">
+                {validation.salaryCheck.map((s) => (
+                  <div key={s.partyTeamId} className="panel-2 px-3 py-2">
+                    <div className={s.ok ? "text-[var(--good)]" : "text-[var(--bad)]"}>
+                      {teams.find((t) => t.id === s.partyTeamId)?.abbr ?? s.partyTeamId}：送出 {s.outgoing.toFixed(2)}M → 接收 {s.incoming.toFixed(2)}M {s.ok ? "✓" : "✕"}
+                    </div>
+                    <div className="text-[var(--text-dim)] mt-0.5">{s.band}</div>
+                  </div>
+                ))}
+              </div>
+            </details>
+          </div>
+        </Section>
+      )}
+
+      <Section
+        title="联盟报价（自动生成，可直接采用）"
+        right={
+          <button className="btn text-[12px] py-1" onClick={() => fetchOffers(false)} disabled={busy || offersBusy || giveCount === 0}>
+            {offersBusy ? "征集中…" : "重新征集"}
           </button>
-        </div>
-        {offers && offers.length === 0 && (
+        }
+      >
+        {giveCount === 0 && <div className="text-[12px] text-[var(--text-dim)]">先在左侧勾选要送出的球员或选秀权，感兴趣的球队会直接给出报价。</div>}
+        {offers && offers.length === 0 && giveCount > 0 && (
           <div className="text-[12px] text-[var(--text-dim)] panel-2 p-3">没有球队对当前送出包感兴趣——价值或薪资配平空间不足，试着调整送出的资产。</div>
         )}
         {offers && offers.length > 0 && (
@@ -398,29 +442,6 @@ export default function TradePage() {
           报价由规则引擎生成：薪资配平、人数上限、Stepien 规则与对方 GM 意愿在展示前已全部通过；「采用」后自动填入交易面板并触发校验，确认无误即可执行。
         </div>
       </Section>
-
-      {validation && (
-        <Section title="规则校验（LEAGUE CBA v1.0 / TRADE-RULES v1.0）">
-          <div className="space-y-2">
-            <div className={`text-[13px] font-semibold ${validation.legal ? "text-[var(--good)]" : "text-[var(--bad)]"}`}>
-              {validation.legal ? "✓ 通过规则校验，可以执行" : "✕ 未通过规则校验"}
-            </div>
-            {validation.salaryCheck.map((s) => (
-              <div key={s.partyTeamId} className="panel-2 px-3 py-2 text-[12px]">
-                <div className={s.ok ? "text-[var(--good)]" : "text-[var(--bad)]"}>
-                  {teams.find((t) => t.id === s.partyTeamId)?.abbr ?? s.partyTeamId}：送出 {s.outgoing.toFixed(2)}M → 接收 {s.incoming.toFixed(2)}M {s.ok ? "✓" : "✕"}
-                </div>
-                <div className="text-[var(--text-dim)] mt-0.5">{s.band}</div>
-              </div>
-            ))}
-            {validation.issues.map((i, idx) => (
-              <div key={idx} className={`px-3 py-2 rounded text-[12px] ${i.severity === "BLOCKER" ? "bg-[#450a0a] text-[#fca5a5]" : "bg-[#451a03] text-[#fcd34d]"}`}>
-                [{i.code}] {i.message}
-              </div>
-            ))}
-          </div>
-        </Section>
-      )}
 
       {feedback && (
         <Section title={`对方 GM 反馈${partner ? `（${partner.city} ${partner.name}）` : ""}`}>
