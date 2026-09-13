@@ -971,6 +971,26 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
   // holder picks in the original team's slot (otherwise traded picks never
   // convey and makeDraftPick deadlocks on slots no pick row can fill).
   const db2 = getDb();
+  // Resolve pick protections before building the order: if the original
+  // team's slot lands inside the protected range, the pick does NOT convey —
+  // the obligation shifts to next year (unprotected, per NBA convention).
+  const protectedPicks = db2
+    .select()
+    .from(picksT)
+    .where(and(eq(picksT.saveId, state.saveId), eq(picksT.year, newSeason), eq(picksT.round, 1)))
+    .all()
+    .filter((r) => r.holderTeamId !== r.originalTeamId && r.protection?.type === "LOTTERY_TOP_X" && r.protection.x);
+  for (const row of protectedPicks) {
+    const origShort = row.originalTeamId.split(":").slice(1).join(":");
+    const slot = lotteryResult.indexOf(origShort) + 1;
+    if (slot >= 1 && slot <= (row.protection?.x ?? 0)) {
+      const shift = row.protection?.yearShift || 1;
+      db2.update(picksT).set({ year: newSeason + shift, protection: null }).where(eq(picksT.id, row.id)).run();
+      const holderAbbr = state.teams.find((t) => t.id === row.holderTeamId.split(":").slice(1).join(":"))?.abbr ?? row.holderTeamId;
+      const origAbbr = state.teams.find((t) => t.id === origShort)?.abbr ?? origShort;
+      logEvent(state.saveId, "DRAFT", `保护条款生效：${origAbbr} 抽到第 ${slot} 顺位（前 ${row.protection?.x} 保护），选秀权归还原队；${holderAbbr} 顺延至 ${newSeason + shift} 年首轮（无保护）`, { pickId: row.id, slot });
+    }
+  }
   const pickHolder = (round: number, origShort: string): string => {
     const row = db2
       .select({ holder: picksT.holderTeamId })

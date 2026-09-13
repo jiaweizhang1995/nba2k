@@ -5,13 +5,14 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { getDb } from "@/db";
-import { players as playersT, teams as teamsT, events as eventsT, saves as savesT } from "@/db/schema";
+import { players as playersT, teams as teamsT, events as eventsT, saves as savesT, draftPicks as picksT } from "@/db/schema";
 import {
   advanceSim,
   createSave,
   deadCapHit,
   executeTrade,
   extendContract,
+  getDraftOrder,
   getPhaseState,
   getSave,
   listInboundOffers,
@@ -456,6 +457,33 @@ describe("player options are the player's call", () => {
     // Opted-in players consumed the option.
     const stayed = overpaid.map((p) => readBack(p.id)).filter((p) => p.status === "ACTIVE");
     for (const p of stayed) expect(p.contract.option).toBeNull();
+  }, 300_000);
+});
+
+describe("pick protections actually protect", () => {
+  it("a lottery-protected traded pick stays home and shifts the obligation", async () => {
+    const s = await createSave({ name: "protection conveys", seed: 555090 });
+    const db = getDb();
+    const season = getSave(s.saveId)!.season;
+    // Rig standings: ORL finishes dead last → guaranteed lottery slot.
+    db.update(teamsT).set({ wins: 60, losses: 22 }).where(eq(teamsT.saveId, s.saveId)).run();
+    const orl = db.select().from(teamsT).where(and(eq(teamsT.saveId, s.saveId), eq(teamsT.abbr, "ORL"))).get()!;
+    db.update(teamsT).set({ wins: 0, losses: 82 }).where(eq(teamsT.id, orl.id)).run();
+    // ORL owes its next first to BOS with lottery protection.
+    const bos = db.select().from(teamsT).where(and(eq(teamsT.saveId, s.saveId), eq(teamsT.abbr, "BOS"))).get()!;
+    const pick = db.select().from(picksT).where(and(eq(picksT.saveId, s.saveId), eq(picksT.year, season + 1), eq(picksT.round, 1), eq(picksT.originalTeamId, orl.id))).get()!;
+    db.update(picksT).set({ holderTeamId: bos.id, protection: { type: "LOTTERY_TOP_X", x: 14, yearShift: 1 } }).where(eq(picksT.id, pick.id)).run();
+    await advanceSim(s.saveId, "SEASON");
+    const after = db.select().from(picksT).where(eq(picksT.id, pick.id)).get()!;
+    // Protection triggered: obligation shifts a year, unprotected now.
+    expect(after.year).toBe(season + 2);
+    expect(after.protection).toBeNull();
+    expect(after.holderTeamId).toBe(bos.id);
+    expect(after.status).toBe("OWNED");
+    // And ORL kept its own lottery slot in this year's order.
+    const order = getDraftOrder(s.saveId);
+    const orlSlot = order.find((o) => o.round === 1 && o.holderTeamId === orl.id.split(":").slice(1).join(":") || o.holderTeamId === orl.id);
+    expect(orlSlot).toBeTruthy();
   }, 300_000);
 });
 

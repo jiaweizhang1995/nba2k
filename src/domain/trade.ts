@@ -261,6 +261,13 @@ export function validateTrade(proposal: TradeProposal, teams: TradeTeam[], seaso
       issues.push({ code: "SALARY_MATCH", severity: "BLOCKER", message: `${team.abbr} 薪资配平失败：送出 ${outgoing.toFixed(2)}M，接收 ${incoming.toFixed(2)}M（${check.band}）` });
     }
 
+    // Second-apron aggregation ban: over the second apron a team cannot
+    // combine multiple player salaries in one deal (1-for-2 is fine — the
+    // ban is on AGGREGATING outgoing salaries to match a bigger contract).
+    if (snap.overSecondApron && givePlayers.length > 1) {
+      issues.push({ code: "APRON_AGGREGATION", severity: "BLOCKER", message: `${team.abbr} 超第二土豪线：不得在交易中打包送出多名球员` });
+    }
+
     // Stepien rule: cannot trade own future 1st in consecutive years.
     // Protected picks are exempt — protection exists precisely to allow trading them.
     if (CBA.stepienRule) {
