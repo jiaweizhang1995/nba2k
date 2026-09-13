@@ -28,7 +28,7 @@ import { importData } from "./import";
 import { RATING_VERSION } from "@/domain/ratings";
 import { createSchedule, advanceDay, applyDevelopment, seasonScore, type LeagueState, type LeaguePlayer, type LeagueTeam, type LeagueGame } from "@/domain/sim/season";
 import { CBA, CBA_VERSION, capSnapshot } from "@/domain/salary";
-import { validateTrade, TRADE_RULES_VERSION, aiEvaluateTrade, type TradeTeam, type TradePlayer, type TradePick } from "@/domain/trade";
+import { validateTrade, generateTradeOffers, TRADE_RULES_VERSION, aiEvaluateTrade, type TradeTeam, type TradePlayer, type TradePick } from "@/domain/trade";
 import { computeChemistry, CHEMISTRY_VERSION } from "@/domain/chemistry";
 import { runLottery, aiDraftPick, prospectRookieContract, generateScoutingReport, registerProspectRatings, type DraftProspect } from "@/domain/draft";
 import { hashSeed, rngFor } from "@/domain/rng";
@@ -786,6 +786,76 @@ export function getAiTradeFeedback(saveId: string, parties: TradeParty[]) {
     teamId: p.teamId,
     verdict: aiEvaluateTrade(p, { saveId, parties }, teams, save.season),
   }));
+}
+
+/**
+ * 征集报价（NBA 2K 式询价）：用户只指定送出的资产，联盟中每支感兴趣的球队
+ * 回报一份具体的、已经过规则校验与对方 GM 意愿评估的报价。确定性：同一存档
+ * 种子 + 同一送出包 → 相同报价列表。
+ */
+export function requestTradeOffers(saveId: string, gives: { kind: "PLAYER" | "PICK"; id: string }[]) {
+  const db = getDb();
+  const save = getSave(saveId);
+  if (!save) throw new EngineError("NO_SAVE", "存档不存在");
+  const phaseState = getPhaseState(saveId);
+  const userTeamId = phaseState.userTeamId as string | undefined;
+  if (!userTeamId) throw new EngineError("NO_TEAM", "请先选择执教球队");
+  const userShort = userTeamId.split(":").pop()!;
+
+  const teamRows = db.select().from(teamsT).where(eq(teamsT.saveId, saveId)).all();
+  const teams = teamRows.map((t) => toTradeTeam(saveId, t.id.split(":").slice(1).join(":")));
+  const userTeam = teams.find((t) => t.id === userShort);
+  if (!userTeam) throw new EngineError("NO_TEAM", "球队不存在");
+
+  const players = gives
+    .filter((a) => a.kind === "PLAYER")
+    .map((a) => {
+      const p = userTeam.players.find((x) => x.id === a.id);
+      if (!p) throw new EngineError("NOT_OWNED", "送出的球员不在你的阵容中");
+      return p;
+    });
+  const picks = gives
+    .filter((a) => a.kind === "PICK")
+    .map((a) => {
+      const pk = userTeam.picks.find((x) => x.id === a.id);
+      if (!pk) throw new EngineError("PICK_NOT_OWNED", "送出的选秀权不归你持有");
+      return pk;
+    });
+  const noTrade = players.filter((p) => p.contract.noTrade);
+  if (noTrade.length > 0) {
+    throw new EngineError("NO_TRADE_CLAUSE", `包含不可交易球员：${noTrade.map((p) => p.name).join("、")}`);
+  }
+  if (players.length + picks.length === 0) {
+    throw new EngineError("EMPTY_OFFER", "请先选择要送出的球员或选秀权");
+  }
+
+  const offers = generateTradeOffers(userShort, { players, picks }, teams, save.season, save.seed);
+
+  const labelFor = (teamShortId: string, a: { kind: "PLAYER" | "PICK"; id: string }) => {
+    const t = teams.find((x) => x.id === teamShortId);
+    if (!t) return a.id;
+    if (a.kind === "PLAYER") return t.players.find((p) => p.id === a.id)?.name ?? a.id;
+    const pk = t.picks.find((p) => p.id === a.id);
+    return pk ? `${pk.year} ${pk.round === 1 ? "首轮" : "次轮"}签` : a.id;
+  };
+
+  logEvent(
+    saveId,
+    "TRADE",
+    `发起询价：送出 ${gives.map((a) => labelFor(userShort, a)).join("、")}；${offers.length} 支球队给出报价`,
+    { gives, offerCount: offers.length },
+  );
+
+  return {
+    offers: offers.map((o) => {
+      const t = teams.find((x) => x.id === o.teamId)!;
+      return {
+        ...o,
+        teamLabel: t.abbr,
+        givesLabeled: o.gives.map((a) => ({ kind: a.kind, id: a.id, label: labelFor(o.teamId, a) })),
+      };
+    }),
+  };
 }
 
 /** Execute a validated trade (or force it via God Mode). */

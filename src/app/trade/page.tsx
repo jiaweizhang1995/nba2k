@@ -52,38 +52,52 @@ function AssetList({
   selectedIds: string[];
   onToggle: (side: "give" | "get", kind: "players" | "picks", id: string) => void;
 }) {
+  const [sortKey, setSortKey] = useState<"overall" | "salary" | "age">("overall");
   const data = rosters.get(teamId);
   if (!data) return <div className="text-[12px] text-[var(--text-dim)]">加载中…</div>;
   if (kind === "players") {
+    const sorted = [...data.players].sort((a, b) =>
+      sortKey === "salary" ? b.salary - a.salary : sortKey === "age" ? a.age - b.age : b.overall - a.overall,
+    );
     return (
-      <div className="scrollbox max-h-72">
-        <table className="data">
-          <thead>
-            <tr>
-              <th style={{ width: 28 }}></th>
-              <th>球员</th>
-              <th>位置</th>
-              <th>年龄</th>
-              <th>综合</th>
-              <th>薪资</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.players.map((p) => (
-              <tr key={p.id} onClick={() => onToggle(side, kind, p.id)} style={{ cursor: "pointer" }}>
-                <td>{selectedIds.includes(p.id) ? "✓" : ""}</td>
-                <td className={p.noTrade ? "text-[var(--bad)]" : ""}>
-                  {p.name}
-                  {p.noTrade ? " (不可交易)" : ""}
-                </td>
-                <td>{p.position}</td>
-                <td>{p.age}</td>
-                <td className="text-[var(--accent)] font-semibold">{p.overall}</td>
-                <td>{fmtSalary(p.salary)}</td>
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-[12px] text-[var(--text-dim)]">球员</span>
+          <select className="input max-w-32 text-[11px] py-0.5" value={sortKey} onChange={(e) => setSortKey(e.target.value as typeof sortKey)}>
+            <option value="overall">按综合评分</option>
+            <option value="salary">按薪资</option>
+            <option value="age">按年龄</option>
+          </select>
+        </div>
+        <div className="scrollbox max-h-72">
+          <table className="data">
+            <thead>
+              <tr>
+                <th style={{ width: 28 }}></th>
+                <th>球员</th>
+                <th>位置</th>
+                <th>年龄</th>
+                <th>综合</th>
+                <th>薪资</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {sorted.map((p) => (
+                <tr key={p.id} onClick={() => onToggle(side, kind, p.id)} style={{ cursor: "pointer" }}>
+                  <td>{selectedIds.includes(p.id) ? "✓" : ""}</td>
+                  <td className={p.noTrade ? "text-[var(--bad)]" : ""}>
+                    {p.name}
+                    {p.noTrade ? " (不可交易)" : ""}
+                  </td>
+                  <td>{p.position}</td>
+                  <td>{p.age}</td>
+                  <td className="text-[var(--accent)] font-semibold">{p.overall}</td>
+                  <td>{fmtSalary(p.salary)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
     );
   }
@@ -116,6 +130,18 @@ export default function TradePage() {
   interface Feedback { teamId: string; verdict: { accept: boolean; valueDelta: number; feedback: string; reasons: string[] } }
   const [validation, setValidation] = useState<Validation | null>(null);
   const [feedback, setFeedback] = useState<Feedback[] | null>(null);
+  const [autoValidating, setAutoValidating] = useState(false);
+  interface OfferItem {
+    teamId: string;
+    teamLabel: string;
+    userNetValue: number;
+    valueDelta: number;
+    verdict: { accept: boolean; valueDelta: number; feedback: string; reasons: string[] };
+    givesLabeled: { kind: "PLAYER" | "PICK"; id: string; label: string }[];
+    interestNotes: string[];
+  }
+  const [offers, setOffers] = useState<OfferItem[] | null>(null);
+  const [offersBusy, setOffersBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<{ msg: string; kind: "ok" | "err" } | null>(null);
   const isGod = !!summary?.save.godMode;
@@ -159,6 +185,7 @@ export default function TradePage() {
   const toggle = (side: "give" | "get", kind: "players" | "picks", id: string) => {
     const setter = side === "give" ? setGive : setGet;
     setter((s) => ({ ...s, [kind]: s[kind].includes(id) ? s[kind].filter((x) => x !== id) : [...s[kind], id] }));
+    if (side === "give") setOffers(null); // 送出包变了，之前的报价全部过期
   };
 
   const buildParties = useMemo(
@@ -192,18 +219,62 @@ export default function TradePage() {
     [userTeamId, partnerId, give, get],
   );
 
-  const validate = async () => {
-    setBusy(true);
+  // 自动校验：选择变化后 350ms 防抖调用规则校验与对方 GM 反馈，无需手动点击。
+  const selectionEmpty = give.players.length + give.picks.length + get.players.length + get.picks.length === 0;
+  useEffect(() => {
+    if (!saveId || !partnerId || selectionEmpty) {
+      setValidation(null);
+      setFeedback(null);
+      return;
+    }
+    setAutoValidating(true);
+    const timer = setTimeout(async () => {
+      try {
+        const parties = buildParties();
+        const j = await api<{ validation: Validation; feedback: Feedback[] }>(`/api/saves/${saveId}/trade`, {
+          method: "PUT",
+          body: JSON.stringify({ parties }),
+        });
+        setValidation(j.validation);
+        setFeedback(j.feedback);
+      } catch {
+        /* 校验暂时失败：保留上一次结果，执行时服务端会再校验 */
+      } finally {
+        setAutoValidating(false);
+      }
+    }, 350);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saveId, partnerId, give, get]);
+
+  const fetchOffers = async () => {
+    setOffersBusy(true);
+    setOffers(null);
     try {
-      const parties = buildParties();
-      const j = await api<{ validation: Validation; feedback: Feedback[] }>(`/api/saves/${saveId}/trade`, { method: "PUT", body: JSON.stringify({ parties }) });
-      setValidation(j.validation);
-      setFeedback(j.feedback);
+      const gives = [
+        ...give.players.map((id) => ({ kind: "PLAYER" as const, id })),
+        ...give.picks.map((id) => ({ kind: "PICK" as const, id })),
+      ];
+      const j = await api<{ offers: OfferItem[] }>(`/api/saves/${saveId}/trade/offers`, {
+        method: "POST",
+        body: JSON.stringify({ gives }),
+      });
+      setOffers(j.offers);
+      if (j.offers.length === 0) setToast({ msg: "没有球队对这份送出包感兴趣，试着调整资产组合。", kind: "err" });
     } catch (e) {
       setToast({ msg: (e as Error).message, kind: "err" });
     } finally {
-      setBusy(false);
+      setOffersBusy(false);
     }
+  };
+
+  const adoptOffer = (o: OfferItem) => {
+    setPartnerId(o.teamId);
+    setGet({
+      players: o.givesLabeled.filter((a) => a.kind === "PLAYER").map((a) => a.id),
+      picks: o.givesLabeled.filter((a) => a.kind === "PICK").map((a) => a.id),
+    });
+    setToast({ msg: "已填入交易面板，规则校验自动进行中。", kind: "ok" });
   };
 
   const execute = async (force: boolean) => {
@@ -220,6 +291,7 @@ export default function TradePage() {
         setGet({ players: [], picks: [] });
         setValidation(null);
         setFeedback(null);
+        setOffers(null);
         await Promise.all([loadTeam(userTeamId), partnerId ? loadTeam(partnerId) : Promise.resolve(), refresh()]);
       } else {
         setValidation(j.result.validation ?? null);
@@ -248,9 +320,6 @@ export default function TradePage() {
             </option>
           ))}
         </select>
-        <button className="btn btn-primary" onClick={validate} disabled={busy || !partnerId}>
-          校验交易
-        </button>
         <button
           className="btn btn-primary"
           onClick={() => execute(false)}
@@ -264,12 +333,12 @@ export default function TradePage() {
             GOD 强制成交
           </button>
         )}
+        {autoValidating && <span className="text-[12px] text-[var(--text-dim)]">规则校验中…</span>}
       </div>
 
       <div className="grid lg:grid-cols-2 gap-4">
         <Section title="你送出（Give）">
           <div className="space-y-3">
-            <div className="text-[12px] text-[var(--text-dim)]">球员</div>
             <AssetList teamId={userTeamId} side="give" kind="players" rosters={rosters} selectedIds={give.players} onToggle={toggle} />
             <div className="text-[12px] text-[var(--text-dim)]">选秀权</div>
             <AssetList teamId={userTeamId} side="give" kind="picks" rosters={rosters} selectedIds={give.picks} onToggle={toggle} />
@@ -277,13 +346,58 @@ export default function TradePage() {
         </Section>
         <Section title="你收到（Get）">
           <div className="space-y-3">
-            <div className="text-[12px] text-[var(--text-dim)]">球员</div>
             <AssetList teamId={partnerId} side="get" kind="players" rosters={rosters} selectedIds={get.players} onToggle={toggle} />
             <div className="text-[12px] text-[var(--text-dim)]">选秀权</div>
             <AssetList teamId={partnerId} side="get" kind="picks" rosters={rosters} selectedIds={get.picks} onToggle={toggle} />
           </div>
         </Section>
       </div>
+
+      <Section title="征集报价（向全联盟询价）">
+        <div className="flex items-center gap-3 flex-wrap mb-3">
+          <span className="text-[12px] text-[var(--text-dim)]">勾选左侧「你送出」的球员/选秀权，联盟中感兴趣的球队会给出具体报价，可直接采用。</span>
+          <button
+            className="btn btn-primary"
+            onClick={fetchOffers}
+            disabled={busy || offersBusy || give.players.length + give.picks.length === 0}
+            title={give.players.length + give.picks.length === 0 ? "先在左侧勾选要送出的资产" : "向 29 支球队征集报价"}
+          >
+            {offersBusy ? "征集中…" : "向全联盟征集报价"}
+          </button>
+        </div>
+        {offers && offers.length === 0 && (
+          <div className="text-[12px] text-[var(--text-dim)] panel-2 p-3">没有球队对当前送出包感兴趣——价值或薪资配平空间不足，试着调整送出的资产。</div>
+        )}
+        {offers && offers.length > 0 && (
+          <div className="grid md:grid-cols-2 gap-2">
+            {offers.map((o) => {
+              const t = teams.find((x) => x.id === o.teamId);
+              return (
+                <div key={o.teamId} className="panel-2 p-3">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div className="text-[13px] font-semibold">
+                      {t?.city} {t?.name}
+                      <span className="tag ml-2">{t?.aiPhase}</span>
+                    </div>
+                    <span className="text-[11px] text-[var(--accent)]">你净赚 {o.userNetValue > 0 ? "+" : ""}{o.userNetValue} 点</span>
+                  </div>
+                  <div className="text-[12px] mt-1.5">
+                    回报：<b>{o.givesLabeled.map((a) => a.label).join("、")}</b>
+                  </div>
+                  <div className="text-[12px] mt-1 text-[var(--text-dim)]">“{o.verdict.feedback}”</div>
+                  {o.interestNotes.length > 0 && <div className="text-[11px] text-[var(--text-dim)] mt-1 leading-relaxed">{o.interestNotes.join("；")}</div>}
+                  <button className="btn btn-primary mt-2 w-full" onClick={() => adoptOffer(o)}>
+                    采用此报价
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <div className="text-[11px] text-[var(--text-dim)] mt-2">
+          报价由规则引擎生成：薪资配平、人数上限、Stepien 规则与对方 GM 意愿在展示前已全部通过；「采用」后自动填入交易面板并触发校验，确认无误即可执行。
+        </div>
+      </Section>
 
       {validation && (
         <Section title="规则校验（LEAGUE CBA v1.0 / TRADE-RULES v1.0）">

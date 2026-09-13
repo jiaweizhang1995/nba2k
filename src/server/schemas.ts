@@ -29,6 +29,10 @@ export const executeTradeSchema = tradeSchema.extend({
   note: z.string().max(200).optional(),
 });
 
+export const tradeOffersSchema = z.object({
+  gives: z.array(z.object({ kind: z.enum(["PLAYER", "PICK"]), id: z.string().min(1) })).min(1).max(10),
+});
+
 export const draftSchema = z.object({
   prospectId: z.string().optional(),
   simulateAll: z.boolean().optional(),

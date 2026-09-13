@@ -1,7 +1,7 @@
 // Trade rules: legal passes, illegal blocked, God Mode explicitly allows.
 // Salary & asset conservation.
 import { beforeAll, describe, expect, it } from "vitest";
-import { createSave, executeTrade, validateTradeOnServer, getTeamAssets, loadLeagueState } from "@/server/engine";
+import { createSave, executeTrade, validateTradeOnServer, getTeamAssets, loadLeagueState, requestTradeOffers } from "@/server/engine";
 import { salaryMatching } from "@/domain/salary";
 import type { TradeParty } from "@/domain/types";
 
@@ -201,5 +201,68 @@ describe("Assets view", () => {
     expect(assets.cap.rosterCount).toBeGreaterThanOrEqual(13);
     expect(assets.picks.length).toBeGreaterThanOrEqual(10); // 7 years × 2 rounds
     expect(assets.versions.cba).toContain("CBA");
+  });
+});
+
+describe("Trade offer collection (征集报价)", () => {
+  // Independent save: earlier tests in this file execute real trades which
+  // mutate the shared league, so offer tests must not depend on their order.
+  let offerSaveId: string;
+  let offerUserTeam: string;
+
+  beforeAll(async () => {
+    const s = await createSave({ name: "询价测试", seed: 424242 });
+    offerSaveId = s.saveId;
+    offerUserTeam = loadLeagueState(offerSaveId).teams[0].id;
+  });
+
+  const rosterOfOffer = (teamId: string) =>
+    loadLeagueState(offerSaveId).players.filter((p) => p.teamId === teamId).sort((a, b) => b.ratings.overall - a.ratings.overall);
+
+  const pickCandidate = () => {
+    const roster = rosterOfOffer(offerUserTeam).filter((p) => !(p.contract as unknown as { noTrade?: boolean }).noTrade);
+    // A mid-rotation salary (5-20M) is the most likely to draw counter-offers.
+    return roster.find((p) => {
+      const s = p.contract.years[0]?.salary ?? 0;
+      return s >= 5 && s <= 20;
+    }) ?? roster[roster.length - 1];
+  };
+
+  it("returns concrete, legal, pre-accepted offers for a plausible outgoing package", () => {
+    const candidate = pickCandidate();
+    const res = requestTradeOffers(offerSaveId, [{ kind: "PLAYER", id: candidate.id }]);
+    expect(res.offers.length).toBeGreaterThan(0);
+    for (const o of res.offers) {
+      expect(o.teamId).not.toBe(offerUserTeam);
+      expect(o.givesLabeled.length).toBeGreaterThan(0);
+      expect(o.verdict.accept).toBe(true);
+      expect(o.givesLabeled.every((a) => a.label && a.label.length > 0)).toBe(true);
+      // Adopting the offer must produce a fully legal trade.
+      const parties = [
+        { teamId: offerUserTeam, gives: [{ kind: "PLAYER" as const, id: candidate.id }], receives: o.gives },
+        { teamId: o.teamId, gives: o.gives, receives: [{ kind: "PLAYER" as const, id: candidate.id }] },
+      ];
+      const v = validateTradeOnServer(offerSaveId, parties);
+      expect(v.legal).toBe(true);
+    }
+  });
+
+  it("is deterministic: same save seed + same outgoing package → identical offers", () => {
+    const candidate = pickCandidate();
+    const a = requestTradeOffers(offerSaveId, [{ kind: "PLAYER", id: candidate.id }]);
+    const b = requestTradeOffers(offerSaveId, [{ kind: "PLAYER", id: candidate.id }]);
+    expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+  });
+
+  it("rejects no-trade players up front", () => {
+    const noTrade = rosterOfOffer(offerUserTeam).find((p) => (p.contract as unknown as { noTrade?: boolean }).noTrade);
+    if (!noTrade) return; // roster may have no no-trade contracts
+    expect(() => requestTradeOffers(offerSaveId, [{ kind: "PLAYER", id: noTrade.id }])).toThrow(/不可交易/);
+  });
+
+  it("rejects assets the user does not own", () => {
+    const otherTeam = loadLeagueState(offerSaveId).teams.find((t) => t.id !== offerUserTeam)!.id;
+    const otherPlayer = rosterOfOffer(otherTeam)[0];
+    expect(() => requestTradeOffers(offerSaveId, [{ kind: "PLAYER", id: otherPlayer.id }])).toThrow(/不在你的阵容中/);
   });
 });
