@@ -35,6 +35,7 @@ import {
   getChemistry,
   getDraftBoard,
   getDraftOrder,
+  getPhaseState,
   getSave,
   listInboundOffers,
   loadLeagueState,
@@ -547,7 +548,7 @@ function buildObservation(evalRow: { saveId: string; teamFullId: string; teamSho
     conferenceRank: st.rank,
     seasonsDone: `${evalRow.seasonsDone}/${evalRow.years}`,
     strategy: evalRow.strategy ?? "（未设置）",
-    cap: { total: cap.totalSalary, space: cap.capSpace, overTax: cap.overTax },
+    cap: { total: cap.totalSalary, space: cap.capSpace, overTax: cap.overTax, overFirstApron: cap.overFirstApron, overSecondApron: cap.overSecondApron, mleUsed: !!getPhaseState(evalRow.saveId)[`mleUsed:${state.season}`] },
     chemistry: chemistry.overall,
     roster: fullRoster,
     // Players whose contract ends this offseason — they enter the market and
@@ -601,7 +602,7 @@ const SYSTEM_PROMPT = `你是篮球经理模拟游戏《HARDWOOD GM》中的球�
 关键规则：
 - 自家合同到期的球员会进入自由市场（freeAgents[].fromMyTeam=true）。你持有鸟权：可超工资帽续约他们（上限为顶薪）；不续约则可能被其他球队签走。roster[].expiring 标记今夏到期者。
 - 休赛期阵容可到 20 人，但常规赛开打前必须裁到 18 人以内，否则 start_new_season 会被拒绝。
-- 工资帽规则：超帽只能用中产特例（≤12.8M/年）或底薪（≤1.2M/年）；超第二土豪线只能用底薪。
+- 工资帽规则：超帽只能用中产特例（≤12.8M/年，每个休赛期全队仅一次，cap.mleUsed 可查是否已用）或底薪（≤1.2M/年）；超第一土豪线失去中产，超第二土豪线只能底薪。
 - 裁员后剩余合同变为死钱仍占工资帽——裁大合同要三思。
 - 交易在 SEASON/DRAFT/FREE_AGENCY 阶段均可提议；get_market 可查看全联盟各队的 phase（CONTENDER/PLAYOFF/BUBBLE/REBUILD）、薪资空间与核心球员，用于挑选交易对象。`;
 

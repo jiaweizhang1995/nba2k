@@ -1852,6 +1852,9 @@ export function startNewSeason(saveId: string) {
     const aiTeams = tx.select().from(teamsT).where(eq(teamsT.saveId, saveId)).all().filter((t) => t.id !== userTeamFullId);
     let aiSigned = 0;
     for (const t of aiTeams) {
+      // One mid-level exception per offseason — over-cap teams can't spam
+      // MLE-sized deals (real rule: the MLE is a single annual exception).
+      let mleUsed = false;
       for (;;) {
         const roster = tx.select().from(playersT).where(and(eq(playersT.saveId, saveId), eq(playersT.teamId, t.id))).all();
         if (roster.length >= AI_ROSTER_TARGET) break;
@@ -1883,7 +1886,7 @@ export function startNewSeason(saveId: string) {
           );
           let salary: number | null = null;
           if (!snap.overCap) salary = Math.min(offer.avgSalary, snap.capSpace);
-          else if (!snap.overSecondApron) salary = Math.min(offer.avgSalary, MLE);
+          else if (!snap.overSecondApron && !mleUsed) salary = Math.min(offer.avgSalary, MLE);
           else if (c.ratings.overall < APRON_FILLER_MAX) salary = CBA.minimumSalary;
           if (salary == null || salary < CBA.minimumSalary) continue;
           const years = Math.max(1, Math.min(CBA.maxContractYears, c.age >= 32 ? 2 : 3));
@@ -1904,6 +1907,7 @@ export function startNewSeason(saveId: string) {
             })
             .where(eq(playersT.id, c.id))
             .run();
+          if (snap.overCap && salary > CBA.minimumSalary + 0.01) mleUsed = true;
           signed = true;
           aiSigned++;
           break;
@@ -1991,13 +1995,15 @@ export function submitFaOffer(saveId: string, playerId: string, years: number, a
   // allowed over the cap (and aprons), up to his max-contract tier. Roster
   // size limits still apply.
   const isBird = player.lastTeamId === `${saveId}:${userShort}`;
+  const mleKey = `mleUsed:${save.season}`;
+  const mleUsed = !!ps[mleKey];
   const afford = isBird
     ? rosterAfter > CBA.offseasonRosterMax
       ? { ok: false, reason: `签约后人数超过休赛期上限 ${CBA.offseasonRosterMax}` }
       : avgSalary <= maxContractValue(player.yearsPro, 1).firstYear
         ? { ok: true, reason: "使用鸟权续约（超帽签下自家自由球员）" }
         : { ok: false, reason: `鸟权续约上限为顶薪 ${maxContractValue(player.yearsPro, 1).firstYear.toFixed(1)}M/年` }
-    : canAfford(team, avgSalary, rosterAfter, team.deadMoney ?? 0);
+    : canAfford(team, avgSalary, rosterAfter, team.deadMoney ?? 0, mleUsed);
 
   // AI competition
   const faPlayer = {
@@ -2051,6 +2057,14 @@ export function submitFaOffer(saveId: string, playerId: string, years: number, a
       .where(eq(playersT.id, `${saveId}:${playerId}`))
       .run();
   });
+  // Consume the team's one mid-level exception when this signing used it:
+  // over-cap, above minimum, not Bird. Minimum/cap-space/Bird signings don't.
+  if (!isBird && afford.reason === "使用中产特例（上限 12.80M）") {
+    db.update(saves)
+      .set({ phaseState: { ...getPhaseState(saveId), [mleKey]: true } as never, updatedAt: now() })
+      .where(eq(saves.id, saveId))
+      .run();
+  }
   logEvent(saveId, "FA", `签约成功：${player.name} ${avgSalary.toFixed(1)}M × ${years} 年`, { playerId, years, avgSalary, reasons: evalResult.reasons });
   return { accepted: true as const, interest: evalResult.interest, reasons: evalResult.reasons };
 }

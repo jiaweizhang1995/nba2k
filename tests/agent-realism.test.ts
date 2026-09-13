@@ -18,7 +18,7 @@ import {
   waivePlayer,
 } from "@/server/engine";
 import { generateDraftClass } from "@/domain/draft";
-import { askingSalaryFor } from "@/domain/freeagency";
+import { askingSalaryFor, canAfford } from "@/domain/freeagency";
 import { CBA, maxContractValue } from "@/domain/salary";
 
 let saveId: string;
@@ -210,6 +210,26 @@ describe("bird rights + cut-down day + AI league dynamics", () => {
       expect(e.message).not.toContain(`${userShort} 送出`);
       expect(e.message).not.toContain(`送出 ${userShort}`);
     }
+  });
+});
+
+describe("mid-level exception is a single annual exception", () => {
+  const mkTeam = (totalSalary: number): import("@/domain/trade").TradeTeam => ({
+    id: "T", abbr: "T", players: Array.from({ length: 14 }, (_, i) => ({
+      id: `p${i}`, name: `P${i}`, teamId: "T", position: "SG", age: 27, yearsPro: 5,
+      ratings: { overall: 70 } as never,
+      contract: { type: "VETERAN" as const, years: [{ season: 2027, salary: totalSalary / 14 }], birdRights: false, noTrade: false, option: null, signedSeason: 2026 },
+      status: "ACTIVE", role: "BENCH",
+    })),
+    picks: [], aiPhase: "PLAYOFF", aiRisk: 0.5, deadMoney: 0,
+  });
+
+  it("an over-cap team gets ONE MLE — the second MLE-sized offer is rejected", () => {
+    const team = mkTeam(160); // over cap, under first apron
+    expect(canAfford(team, 12, 15, 0, false).ok).toBe(true);
+    expect(canAfford(team, 12, 15, 0, true).ok).toBe(false);
+    // minimum deals still work after the MLE is spent
+    expect(canAfford(team, CBA.minimumSalary, 15, 0, true).ok).toBe(true);
   });
 });
 

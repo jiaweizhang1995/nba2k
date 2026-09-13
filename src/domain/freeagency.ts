@@ -48,8 +48,9 @@ export interface FaEvaluation {
   reasons: string[];
 }
 
-/** Does the team have room or an exception to pay this? */
-export function canAfford(team: TradeTeam, avgSalary: number, rosterAfter: number, deadMoney = 0): { ok: boolean; reason: string } {
+/** Does the team have room or an exception to pay this? `mleUsed` = the
+ * team's one mid-level exception this offseason is already spent. */
+export function canAfford(team: TradeTeam, avgSalary: number, rosterAfter: number, deadMoney = 0, mleUsed = false): { ok: boolean; reason: string } {
   const snap = capSnapshot(team.players.map((p) => ({ contract: p.contract })), rosterAfter, deadMoney);
   if (rosterAfter > CBA.offseasonRosterMax) return { ok: false, reason: `签约后人数超过休赛期上限 ${CBA.offseasonRosterMax}` };
   if (!snap.overCap) {
@@ -60,8 +61,9 @@ export function canAfford(team: TradeTeam, avgSalary: number, rosterAfter: numbe
   // 若先判 overSecondApron 连底薪都会被拒（与提示文案矛盾）。
   if (avgSalary <= CBA.minimumSalary + 0.01) return { ok: true, reason: "使用底薪特例" };
   if (snap.overSecondApron) return { ok: false, reason: "球队超过第二土豪线，只能签底薪" };
-  const mle = snap.overFirstApron ? CBA.minimumSalary : 12.8;
-  if (avgSalary <= mle) return { ok: true, reason: `使用中产特例（上限 ${mle.toFixed(1)}M）` };
+  if (snap.overFirstApron) return { ok: false, reason: "球队超过第一土豪线，只能签底薪" };
+  if (mleUsed) return { ok: false, reason: "本赛季中产特例已使用，只剩底薪可用" };
+  if (avgSalary <= 12.8) return { ok: true, reason: "使用中产特例（上限 12.80M）" };
   return { ok: false, reason: "球队在工资帽以上且特例不足以匹配报价" };
 }
 
