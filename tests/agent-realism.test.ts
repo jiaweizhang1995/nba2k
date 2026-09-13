@@ -429,6 +429,36 @@ describe("contract extensions — lock up expiring talent before the market", ()
   }, 120_000);
 });
 
+describe("player options are the player's call", () => {
+  it("underpaid stars opt out; overpaid vets take the guaranteed year", async () => {
+    const s = await createSave({ name: "player options", seed: 555080 });
+    const db = getDb();
+    const season = getSave(s.saveId)!.season;
+    const all = db.select().from(playersT).where(eq(playersT.saveId, s.saveId)).all()
+      .filter((p) => p.status === "ACTIVE" && p.teamId);
+    // Eight clearly-underpaid stars on a PO year (option 6M vs ~30M ask) and
+    // eight overpaid role players (option 12M vs ~8M ask) → mixed outcomes.
+    const underpaid = all.filter((p) => p.ratings.overall >= 82).slice(0, 8);
+    const overpaid = all.filter((p) => p.ratings.overall <= 72 && p.ratings.overall >= 65).slice(0, 8);
+    for (const p of underpaid) {
+      db.update(playersT).set({ contract: { ...p.contract, option: "PO", years: [{ season: season + 1, salary: 6 }] } }).where(eq(playersT.id, p.id)).run();
+    }
+    for (const p of overpaid) {
+      db.update(playersT).set({ contract: { ...p.contract, option: "PO", years: [{ season: season + 1, salary: 14 }] } }).where(eq(playersT.id, p.id)).run();
+    }
+    await advanceSim(s.saveId, "SEASON");
+    const readBack = (id: string) => db.select().from(playersT).where(eq(playersT.id, id)).get()!;
+    const underOut = underpaid.filter((p) => readBack(p.id).status === "FREE_AGENT").length;
+    const overOut = overpaid.filter((p) => readBack(p.id).status === "FREE_AGENT").length;
+    // Underpaid stars mostly walk; overpaid vets overwhelmingly opt in.
+    expect(underOut).toBeGreaterThanOrEqual(2);
+    expect(overOut).toBeLessThanOrEqual(2);
+    // Opted-in players consumed the option.
+    const stayed = overpaid.map((p) => readBack(p.id)).filter((p) => p.status === "ACTIVE");
+    for (const p of stayed) expect(p.contract.option).toBeNull();
+  }, 300_000);
+});
+
 describe("stretch provision on waivers", () => {
   it("stretching spreads dead money over 2n+1 seasons at the same total", async () => {
     const s = await createSave({ name: "stretch", seed: 555070 });

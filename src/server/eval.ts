@@ -251,6 +251,8 @@ function teamRoster(evalRow: { saveId: string; teamFullId: string; season?: numb
         return st && st.g > 0 ? Math.round((st.mp / st.g) * 10) / 10 : 0;
       })(),
       noTrade: p.contract.noTrade,
+      // PO on the final year = he can walk this summer; TO = our call.
+      option: p.contract.option,
       // Morale signal: losing teams and buried talent erode satisfaction;
       // a disgruntled star is a trade-demand waiting to happen.
       morale: p.satisfaction <= 40 ? "UNHAPPY" : p.satisfaction <= 58 ? "UNEASY" : "CONTENT",
@@ -401,8 +403,27 @@ function toolProposeTrade(
     { teamId: evalRow.teamShortId, gives: [...givePlayers, ...givePicks], receives: [...recvPlayers, ...recvPicks] },
     { teamId: partner, gives: [...recvPlayers, ...recvPicks], receives: [...givePlayers, ...givePicks] },
   ];
+  // Negotiated pick protections: the agent may attach top-x protection to
+  // first-round picks it's giving away. Protection lives on the pick row and
+  // moves with it — apply before valuation, restore if the trade dies.
+  const protReq = (params.pickProtections ?? {}) as Record<string, { x?: number }>;
+  const protBackup = new Map<string, unknown>();
+  const appliedProt: string[] = [];
+  const restoreProt = () => {
+    for (const [id, old] of protBackup) getDb().update(picksT).set({ protection: old as never }).where(eq(picksT.id, id)).run();
+  };
+  for (const [sid, spec] of Object.entries(protReq)) {
+    if (!givePicks.some((a) => a.id === sid)) continue; // only picks we give
+    const row = getDb().select().from(picksT).where(eq(picksT.id, `${evalRow.saveId}:${sid}`)).get();
+    const x = Math.max(1, Math.min(14, Math.floor(Number(spec?.x ?? 0))));
+    if (!row || row.round !== 1 || !x) continue;
+    protBackup.set(row.id, row.protection);
+    getDb().update(picksT).set({ protection: { type: "LOTTERY_TOP_X", x, yearShift: 1 } }).where(eq(picksT.id, row.id)).run();
+    appliedProt.push(sid);
+  }
   const validation = validateTradeOnServer(evalRow.saveId, parties);
   if (!validation.legal) {
+    restoreProt();
     return {
       summary: `交易被规则拒绝：${validation.issues.map((i) => i.message).join("；").slice(0, 200)}`,
       data: { validation },
@@ -413,6 +434,7 @@ function toolProposeTrade(
   const feedback = getAiTradeFeedback(evalRow.saveId, parties);
   const rejected = feedback.filter((f) => !f.verdict.accept);
   if (rejected.length > 0) {
+    restoreProt();
     return {
       summary: `规则允许但对方 GM 拒绝：${rejected.map((f) => `${f.teamId}（价值差 ${f.verdict.valueDelta}）：${f.verdict.feedback}`).join("；").slice(0, 200)}`,
       data: { validation, feedback },
@@ -422,6 +444,7 @@ function toolProposeTrade(
   }
   const result = executeTrade(evalRow.saveId, parties, {});
   if (!result.executed) {
+    restoreProt();
     return { summary: "交易执行失败", data: { validation }, isAction: true, legal: false };
   }
   const names = parties[0].gives.map((a) => a.id).join(",");
@@ -613,7 +636,7 @@ function standingsRank(state: ReturnType<typeof loadLeagueState>, teamShortId: s
 const SYSTEM_PROMPT = `你是篮球经理模拟游戏《HARDWOOD GM》中的球队总经理 AI。你通过返回严格 JSON 动作来运营球队。
 可用动作（必须逐字使用 action 字段；观察里的 allowedActions 列出当前阶段合法动作）：
 - get_roster / get_assets / get_market：查看信息（返回的对象都带 id 字段，动作参数必须使用这些 id，禁止猜测）
-- propose_trade：params = { partnerTeamId, givePlayerIds[], givePickIds[], receivePlayerIds[], receivePickIds[] }（partnerTeamId 用球队 teamId，其余用球员/选秀权的 id）
+- propose_trade：params = { partnerTeamId, givePlayerIds[], givePickIds[], receivePlayerIds[], receivePickIds[], pickProtections? }（partnerTeamId 用球队 teamId，其余用球员/选秀权的 id；pickProtections = {送出的首轮id: {x: N}} 可谈判前 N 顺位保护——保护的签价值打折但更容易成交/绕过选秀权限制）
 - respond_trade：params = { offerId, accept }（回应 inboundOffers 里 AI 球队的主动报价；accept=true 接受，false 拒绝）
 - respond_offer_sheet：params = { sheetId, match }（回应 offerSheets 里对你受限自由球员的报价单；match=true 按报价单条款留人，false 放人）
 - extend_contract：params = { playerId, extraYears, avgSalary }（提前续约还剩 ≤2 年合同的我方球员：首年 ≤ 末年薪资140%、年限 ≥2、价格约要价 95%（≤25 岁新星不打折）；锁定他免于进自由市场）
@@ -638,6 +661,7 @@ const SYSTEM_PROMPT = `你是篮球经理模拟游戏《HARDWOOD GM》中的球�
 - 自由市场是活的：每推进一天，AI 球队就会按市场价签人——好球员先被抢走，拖得越久池子越薄；报价远低于要价会被直接拒绝。
 - 裁员后剩余合同变为死钱仍占工资帽——裁大合同要三思。
 - roster[].morale 反映球员士气：输球文化和被埋没的天赋会让球星 UNHAPPY——不处理可能贬值甚至逼宫。
+- 球员选项年（contract.option=PO）由球员自己决定：市场价远超选项年薪或士气低他会跳出去（成为自由球员，你有鸟权可留），溢价老将多半执行。
 - 年轻球员的成长吃真实上场时间：≤24 岁球员每季打 ≥40 场且场均 ≥20 分钟会加速成长，枯坐板凳（<25 场或 <8 分钟）则停滞——练新人还是冲战绩是你每个赛季的真实权衡。
 - 新秀合同到期的球员是受限自由球员（freeAgents[].restricted=true）：别队签他你只能匹配报价单（offerSheets，3 天或休赛期结束前决定，match 则按报价条款留人、可超帽），放弃或超期即白白放走；同理你签别队的受限自由球员也可能被母队匹配而落空。
 - 交易在 SEASON/DRAFT/FREE_AGENCY 阶段均可提议，但常规赛交易窗口在 2 月 6 日截止日关闭（之后只能等到休赛期）；get_market 可查看全联盟各队的 phase（CONTENDER/PLAYOFF/BUBBLE/REBUILD）、薪资空间与核心球员，用于挑选交易对象。`;

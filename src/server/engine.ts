@@ -857,6 +857,33 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
   for (const p of state.players) {
     if (p.status === "PROSPECT") continue;
     const end = p.contract.years.length ? p.contract.years[p.contract.years.length - 1].season : 0;
+    // Player option on its final year: the PLAYER decides — opt in and the
+    // year plays out; opt out and he hits free agency now. Underpaid and
+    // unhappy players walk; aging or overpaid ones take the guaranteed year.
+    if (p.teamId && p.contract.option === "PO" && p.contract.years.length === 1 && p.contract.years[0].season === newSeason) {
+      const optSalary = p.contract.years[0].salary;
+      const ask = askingSalaryFor(p.contract, p.yearsPro, p.ratings.overall, p.age, newSeason);
+      let optOut = ask > optSalary * 1.15 ? 0.55 : ask > optSalary ? 0.3 : 0.08;
+      if (p.satisfaction < 40) optOut += 0.2;
+      if (p.age >= 33) optOut -= 0.15;
+      const oRng = rngFor(state.seed, `po:${state.season}:${p.id}`);
+      if (oRng.chance(Math.max(0.03, Math.min(0.9, optOut)))) {
+        const isUser = p.teamId === userShort;
+        p.lastTeamId = p.teamId;
+        p.teamId = null;
+        p.status = "FREE_AGENT";
+        if (isUser) {
+          userExpired++;
+          logEvent(state.saveId, "FA", `${p.name} 跳出球员选项成为自由球员（市场价 ${ask.toFixed(1)}M > 选项年薪 ${optSalary.toFixed(1)}M）`, { playerId: p.id });
+        } else {
+          enteredFa++;
+        }
+        continue;
+      }
+      // Opted in — the option is consumed, the year plays out.
+      p.contract = { ...p.contract, option: null };
+      continue;
+    }
     if (end >= newSeason || !p.teamId) continue;
     if (p.teamId === userShort) {
       // Team-option year on the user's roster: the GM exercises it — the
