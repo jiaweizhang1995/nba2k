@@ -818,6 +818,15 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
     }
   }
 
+  // Elapsed contract years are dropped at rollover so years[0] is always the
+  // UPCOMING season's salary — imported deals escalate year over year and
+  // the cap must bill the current year, not the signing year's number.
+  for (const p of state.players) {
+    if (p.contract.years.length > 0 && p.contract.years[0].season < newSeason) {
+      p.contract = { ...p.contract, years: p.contract.years.filter((y) => y.season >= newSeason) };
+    }
+  }
+
   const userShort = (() => {
     const uid = getPhaseState(state.saveId).userTeamId as string | undefined;
     return uid ? stripId(uid) : null;

@@ -229,12 +229,13 @@ export function validateTrade(proposal: TradeProposal, teams: TradeTeam[], seaso
     }
 
     // Dec-15 rule: a player signed this season is trade-locked until
-    // Dec 15 — sign-and-flip is not a real arbitrage.
+    // Dec 15 — sign-and-flip is not a real arbitrage. The season label is
+    // the ENDING year (2027 = 2026-27 season), so Dec 15 falls in season-1.
     for (const p of givePlayers) {
       if (p && p.contract.signedSeason === season) {
         const locked =
           now?.phase === "FREE_AGENCY" || now?.phase === "DRAFT" ||
-          (now?.phase === "REGULAR_SEASON" && (now.date ?? "") < `${season}-12-15`);
+          (now?.phase === "REGULAR_SEASON" && (now.date ?? "") < `${season - 1}-12-15`);
         if (locked) {
           issues.push({ code: "RECENTLY_SIGNED", severity: "BLOCKER", message: `${p.name} 本赛季刚签约，12 月 15 日前不可被交易` });
         }

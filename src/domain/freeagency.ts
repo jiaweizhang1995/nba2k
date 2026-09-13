@@ -30,7 +30,9 @@ export interface OfferInput {
  * cap, 10-year vets on 50M+ deals would ask above the legal max.
  */
 export function askingSalaryFor(contract: Contract, yearsPro: number, overall = 70, age = 27, season?: number): number {
-  const prev = contract.years[0]?.salary ?? 5;
+  // Anchor on the salary he JUST earned (last year entry), not the first —
+  // escalating deals make the gap real over a 5-year eval.
+  const prev = contract.years[contract.years.length - 1]?.salary ?? 5;
   const maxFirst = maxContractValue(yearsPro, 1, season ?? contract.years[0]?.season ?? 2027).firstYear;
   // Market value is set by talent, not by what the last contract happened to
   // pay — an 85-overall player coming off a rookie deal does not ask 5.5M.

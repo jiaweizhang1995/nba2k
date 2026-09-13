@@ -4,7 +4,7 @@ import { players as playersT } from "@/db/schema";
 import { getSave, submitFaOffer, getPhaseState, startFreeAgency, startNewSeason } from "@/server/engine";
 import { handleError, ok, parseBody, fail } from "@/server/api-helpers";
 import { faOfferSchema } from "@/server/schemas";
-import { FA_RULES_VERSION } from "@/domain/freeagency";
+import { FA_RULES_VERSION, askingSalaryFor } from "@/domain/freeagency";
 
 export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> }) {
   try {
@@ -22,9 +22,9 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
         age: p.age,
         overall: p.ratings.overall,
         potential: p.ratings.potential,
-        askingSalary: Math.max(1.2, (p.contract.years[0]?.salary ?? 5) * 1.05),
+        askingSalary: askingSalaryFor(p.contract, p.yearsPro, p.ratings.overall, p.age, save.season),
         askingYears: p.age >= 32 ? 2 : 3,
-        priorSalary: p.contract.years[0]?.salary ?? null,
+        priorSalary: p.contract.years[p.contract.years.length - 1]?.salary ?? null,
       })),
       phase: save.phase,
       userTeamId,

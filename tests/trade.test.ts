@@ -272,3 +272,31 @@ describe("Trade offer collection (征集报价)", () => {
     expect(() => requestTradeOffers(offerSaveId, [{ kind: "PLAYER", id: otherPlayer.id }])).toThrow(/不在你的阵容中/);
   });
 });
+
+describe("Dec-15 recently-signed lock", () => {
+  it("releases on Dec 15 of the SIGNING calendar year, not a year late", async () => {
+    const { validateTrade } = await import("@/domain/trade");
+    const state = loadLeagueState(saveId);
+    const mkTeam = (id: string, pids: string[]) => ({
+      id, abbr: id,
+      players: pids.map((pid) => {
+        const p = state.players.find((x) => x.id === pid)!;
+        return { id: p.id, name: p.name, teamId: id, position: p.position, age: p.age, yearsPro: p.yearsPro, ratings: p.ratings as never, contract: { ...p.contract, signedSeason: 2027 }, status: p.status, role: p.role, satisfaction: p.satisfaction };
+      }),
+      picks: [], aiPhase: "PLAYOFF" as const, aiRisk: 0.5, deadMoney: 0,
+    });
+    const pair = findSalaryMatchPair()!;
+    const a = pair.u;
+    const b = pair.p;
+    const teams = [mkTeam(userTeam, [a.id]), mkTeam(partnerTeam, [b.id])];
+    // Pad rosters so min-size doesn't interfere: validator only checks given teams.
+    const parties = [
+      { teamId: userTeam, gives: [{ kind: "PLAYER" as const, id: a.id }], receives: [{ kind: "PLAYER" as const, id: b.id }] },
+      { teamId: partnerTeam, gives: [{ kind: "PLAYER" as const, id: b.id }], receives: [{ kind: "PLAYER" as const, id: a.id }] },
+    ];
+    const locked = validateTrade({ saveId, parties }, teams, 2027, { phase: "REGULAR_SEASON", date: "2026-12-14" });
+    expect(locked.issues.some((i) => i.code === "RECENTLY_SIGNED")).toBe(true);
+    const free = validateTrade({ saveId, parties }, teams, 2027, { phase: "REGULAR_SEASON", date: "2026-12-16" });
+    expect(free.issues.some((i) => i.code === "RECENTLY_SIGNED")).toBe(false);
+  });
+});
