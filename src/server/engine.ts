@@ -2885,11 +2885,27 @@ function runAiInSeasonSignings(saveId: string, date: string): number {
       .where(and(eq(playersT.saveId, saveId), eq(playersT.teamId, t.id)))
       .all()
       .filter((p) => p.status === "ACTIVE" || p.status === "INJURED");
-    if (roster.length >= CBA.maxRosterSize) continue;
     const healthy = roster.filter((p) => p.status === "ACTIVE" && !(p.injury && p.injury.weeksRemaining > 0));
     const starOut = roster.some((p) => p.ratings.overall >= 82 && p.injury && p.injury.weeksRemaining >= 4);
     const thin = healthy.length < 13;
     if (!thin && !starOut) continue;
+    // Full roster but a star is shelved: waive the cheapest end-of-bench body
+    // to open a spot — real contenders churn the 15th man for injury cover.
+    if (roster.length >= CBA.maxRosterSize) {
+      if (!starOut || !rng.chance(0.7)) continue;
+      const cut = roster
+        .filter((p) => p.status === "ACTIVE" && !(p.injury && p.injury.weeksRemaining > 0))
+        .sort((a, b) => (a.contract.years[0]?.salary ?? 0) - (b.contract.years[0]?.salary ?? 0) || a.ratings.overall - b.ratings.overall)[0];
+      if (!cut || (cut.contract.years[0]?.salary ?? 99) > money.minimumSalary + 2) continue;
+      const deadEntries = cut.contract.years.filter((y) => y.season >= save.season).map((y) => ({ season: y.season, salary: y.salary }));
+      const cur = deadCapTable(saveId);
+      const tShort = shortId(t.id);
+      cur[tShort] = [...(cur[tShort] ?? []), ...deadEntries];
+      db.update(playersT).set({ teamId: null, lastTeamId: t.id, status: "FREE_AGENT" }).where(eq(playersT.id, cut.id)).run();
+      db.update(saves).set({ phaseState: { ...ps, deadCap: cur } as never, updatedAt: now() }).where(eq(saves.id, saveId)).run();
+      logEvent(saveId, "ROSTER", `${tShort} 裁掉 ${cut.name} 腾位补伤病（死钱 ${deadEntries.reduce((a, e) => a + e.salary, 0).toFixed(1)}M）`, { playerId: cut.id, teamId: t.id });
+      roster.splice(roster.indexOf(cut), 1);
+    }
     // Rebuilders let it ride — the shopping list is a contender thing.
     const urgency = t.aiPhase === "REBUILD" ? 0.25 : thin ? 0.85 : 0.6;
     if (!rng.chance(urgency)) continue;

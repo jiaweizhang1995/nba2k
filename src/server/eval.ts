@@ -251,6 +251,10 @@ function teamRoster(evalRow: { saveId: string; teamFullId: string; season?: numb
         const st = p.seasonStats.find((s) => s.season === season);
         return st && st.g > 0 ? Math.round((st.mp / st.g) * 10) / 10 : 0;
       })(),
+      ppg: (() => {
+        const st = p.seasonStats.find((s) => s.season === season);
+        return st && st.g > 0 ? Math.round((st.pts / st.g) * 10) / 10 : 0;
+      })(),
       noTrade: p.contract.noTrade,
       // PO on the final year = he can walk this summer; TO = our call.
       option: p.contract.option,
@@ -289,6 +293,14 @@ function toolGetAssets(evalRow: { saveId: string; teamFullId: string; seed: numb
     .all()
     .filter((p) => p.status === "OWNED")
     .map((p) => ({ id: shortId(p.id), year: p.year, round: p.round, protection: p.protection?.type ?? "NONE" }));
+  // Picks of MINE held by other teams — owed obligations the GM must track.
+  const owed = db
+    .select()
+    .from(picksT)
+    .where(and(eq(picksT.saveId, evalRow.saveId), eq(picksT.originalTeamId, evalRow.teamFullId)))
+    .all()
+    .filter((p) => p.status === "OWNED" && p.holderTeamId !== evalRow.teamFullId)
+    .map((p) => ({ year: p.year, round: p.round, heldBy: shortId(p.holderTeamId), protection: p.protection?.type ?? "NONE" }));
   const cap = capSummaryOf(evalRow.saveId, evalRow.teamFullId);
   const contracts = db
     .select()
@@ -300,7 +312,7 @@ function toolGetAssets(evalRow: { saveId: string; teamFullId: string; seed: numb
     .slice(0, 8);
   return {
     summary: `查看资产：未来签 ${picks.length} 个，薪资总额 ${cap.totalSalary}M`,
-    data: { picks, cap, topContracts: contracts },
+    data: { picks, owedPicks: owed, cap, topContracts: contracts },
     isAction: false,
   };
 }
@@ -362,7 +374,7 @@ function toolGetMarket(evalRow: { saveId: string; teamFullId: string; seed: numb
         .sort((a, b) => b.ratings.overall - a.ratings.overall);
       const cap = capSummaryOf(evalRow.saveId, t.id);
       const top = roster.slice(0, 4).map((p) => ({ id: shortId(p.id), name: p.name, pos: p.position, overall: p.ratings.overall, salary: p.contract.years[0]?.salary ?? 0, morale: p.satisfaction <= 40 ? "UNHAPPY" : "OK" }));
-      return { teamId: shortId(t.id), abbr: t.abbr, phase: t.aiPhase, capSpace: cap.capSpace, rosterSize: roster.length, top };
+      return { teamId: shortId(t.id), abbr: t.abbr, phase: t.aiPhase, record: `${t.wins}-${t.losses}`, capSpace: cap.capSpace, rosterSize: roster.length, top };
     });
   return { summary: `查看市场：自由球员 ${fas.length} 人（展示前 16），全联盟 ${sample.length} 队`, data: { freeAgents: fas, teams: sample }, isAction: false };
 }
