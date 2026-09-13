@@ -18,6 +18,8 @@ export interface TradePlayer {
   contract: Contract;
   status: string;
   role: string;
+  /** Locker-room mood 0-100; <35 means disgruntled and drags trade value. */
+  satisfaction?: number;
 }
 
 export interface TradePick {
@@ -111,12 +113,18 @@ export function playerValue(p: TradePlayer, season: number): Valuation {
   }
   if (p.contract.noTrade) v *= 0.7;
 
+  // Disgruntled discount: the whole league knows an unhappy star wants out —
+  // his team loses leverage (Harden/Simmons/Durant precedents). Symmetric:
+  // works against the user's asks AND makes AI malcontents gettable.
+  if ((p.satisfaction ?? 70) < 35) v *= 0.8;
+
   const breakdown = [
     `基础：评分 ${r.overall} → ${base.toFixed(1)} 点`,
     r.potential != null && p.age <= 24 ? `潜力加成：上限 ${r.potential} → +${(Math.max(0, r.potential - r.overall) * 2.4).toFixed(1)}` : null,
     `年龄系数 ×${ageMultiplier(p.age).toFixed(2)}（${p.age} 岁）`,
     contractNote || `合同 ${salary.toFixed(1)}M，剩余 ${yearsLeft} 年`,
     p.contract.noTrade ? "含不可交易条款" : null,
+    (p.satisfaction ?? 70) < 35 ? `士气低落（${p.satisfaction}），逼宫折价 ×0.8` : null,
   ].filter(Boolean) as string[];
 
   return { kind: "PLAYER", id: p.id, name: p.name, value: round2(v), breakdown };

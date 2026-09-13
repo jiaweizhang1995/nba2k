@@ -664,3 +664,50 @@ export function applyDevelopment(state: LeagueState): { playerId: string; name: 
   }
   return out;
 }
+
+/**
+ * In-season morale drift, applied monthly. Losing grates on stars and vets
+ * in real time (not just at the offseason review), winning slowly heals, and
+ * a high-overall player buried at the end of the rotation festers. Smaller
+ * magnitudes than the annual drift — this is a slow burn.
+ */
+export function applyMonthlyMorale(state: LeagueState): { playerId: string; name: string; from: number; to: number }[] {
+  const out: { playerId: string; name: string; from: number; to: number }[] = [];
+  const winPctByTeam = new Map(state.teams.map((t) => [t.id, (t.wins + t.losses) > 0 ? t.wins / (t.wins + t.losses) : 0.5]));
+  const rankInTeam = new Map<string, number>();
+  for (const t of state.teams) {
+    const tp = state.players.filter((p) => p.teamId === t.id && (p.status === "ACTIVE" || p.status === "INJURED"));
+    const cfg = state.rotation?.[t.id];
+    // With a manager-set rotation, "buried" means buried in the ACTUAL
+    // pecking order — benching an 85-overall star makes him unhappy even
+    // though he's still the second-best name on the roster sheet.
+    if (cfg?.starters?.length) {
+      const starterSet = new Set(cfg.starters);
+      tp.sort((a, b) =>
+        (starterSet.has(b.id) ? 1 : 0) - (starterSet.has(a.id) ? 1 : 0) ||
+        (cfg.minutes?.[b.id] ?? 0) - (cfg.minutes?.[a.id] ?? 0) ||
+        b.ratings.overall - a.ratings.overall,
+      );
+    } else {
+      tp.sort((a, b) => b.ratings.overall - a.ratings.overall);
+    }
+    tp.forEach((p, i) => rankInTeam.set(p.id, i));
+  }
+  for (const p of state.players) {
+    if (!p.teamId || (p.status !== "ACTIVE" && p.status !== "INJURED")) continue;
+    const winPct = winPctByTeam.get(p.teamId) ?? 0.5;
+    const rank = rankInTeam.get(p.id) ?? 9;
+    let mood = 0;
+    if (winPct >= 0.6) mood += 2;
+    else if (winPct <= 0.32) mood -= p.ratings.overall >= 82 || p.age >= 31 ? 4 : 2;
+    if (p.ratings.overall >= 80 && rank >= 9) mood -= 3;
+    if (mood === 0) continue;
+    const from = p.satisfaction;
+    const to = Math.max(15, Math.min(95, from + mood));
+    if (to !== from) {
+      p.satisfaction = to;
+      out.push({ playerId: p.id, name: p.name, from, to });
+    }
+  }
+  return out;
+}

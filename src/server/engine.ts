@@ -26,7 +26,7 @@ import { generateDemoLeague, DEMO_PROVIDER, DEMO_LICENSE, demoSource } from "@/d
 import { loadRealPayload } from "@/data/real";
 import { importData } from "./import";
 import { RATING_VERSION } from "@/domain/ratings";
-import { createSchedule, advanceDay, applyDevelopment, seasonScore, type LeagueState, type LeaguePlayer, type LeagueTeam, type LeagueGame } from "@/domain/sim/season";
+import { createSchedule, advanceDay, applyDevelopment, applyMonthlyMorale, seasonScore, type LeagueState, type LeaguePlayer, type LeagueTeam, type LeagueGame } from "@/domain/sim/season";
 import { CBA, CBA_VERSION, capSnapshot, round2, maxContractValue, contractEndSeason, salaryForSeason, seasonMoney } from "@/domain/salary";
 import { validateTrade, generateTradeOffers, TRADE_RULES_VERSION, aiEvaluateTrade, needPremium, playerValue, type TradeTeam, type TradePlayer, type TradePick } from "@/domain/trade";
 import { computeChemistry, CHEMISTRY_VERSION } from "@/domain/chemistry";
@@ -589,6 +589,9 @@ export function advanceSim(saveId: string, mode: AdvanceMode, marketDiag?: Recor
   // up for their new teams for the rest of the season.
   const deadlineDate = `${state.season}-02-06`;
   let deadlineDone = Boolean((phaseState as Record<string, unknown>)[`deadlineMarket:${state.season}`]);
+  // Locker-room temperature is checked once per calendar month during the
+  // season — losing streaks erode morale in real time, not just in July.
+  let moraleMonth = state.currentDate.slice(0, 7);
 
   const playedGameIds: string[] = [];
   for (let i = 0; i < maxDays; i++) {
@@ -614,6 +617,10 @@ export function advanceSim(saveId: string, mode: AdvanceMode, marketDiag?: Recor
         result.notes.push(`自由市场动态：AI 球队今日签下 ${n} 人`);
         state = loadLeagueState(saveId);
       }
+    }
+    if (state.phase === "REGULAR_SEASON" && report.date.slice(0, 7) !== moraleMonth) {
+      moraleMonth = report.date.slice(0, 7);
+      applyMonthlyMorale(state);
     }
     if (!deadlineDone && state.phase === "REGULAR_SEASON" && report.date >= deadlineDate) {
       persistState(state);
@@ -684,6 +691,27 @@ export function advanceSim(saveId: string, mode: AdvanceMode, marketDiag?: Recor
   if (enteringOffseason) {
     result.awards = recordAwards(state, champion);
     prepareDraft(state, result);
+  }
+
+  // Trade demands: a star whose satisfaction has cratered goes public once
+  // per season. The event is how the GM learns the locker room is burning —
+  // and why the league just started lowballing him (see playerValue).
+  const demandsKey = `demands:${state.season}`;
+  const demanded = new Set<string>((getPhaseState(saveId)[demandsKey] as string[] | undefined) ?? []);
+  const newDemands = state.players.filter(
+    (p) => p.teamId && p.status === "ACTIVE" && p.ratings.overall >= 78 && p.satisfaction < 30 && !demanded.has(p.id),
+  );
+  if (newDemands.length) {
+    for (const p of newDemands) {
+      demanded.add(p.id);
+      const abbr = state.teams.find((t) => t.id === p.teamId)?.abbr ?? p.teamId;
+      logEvent(saveId, "MORALE", `${p.name}（${abbr}）对球队状况极度不满，正式提出交易申请`, { playerId: p.id, satisfaction: p.satisfaction, userTeam: p.teamId === userTeamId });
+      if (p.teamId === userTeamId) result.notes.push(`警告：${p.name} 士气崩盘（${p.satisfaction}），已公开提出交易申请——他的交易价值正在缩水`);
+    }
+    db.update(saves)
+      .set({ phaseState: { ...getPhaseState(saveId), [demandsKey]: [...demanded] } as never, updatedAt: now() })
+      .where(eq(saves.id, saveId))
+      .run();
   }
 
   persistState(state);
@@ -1030,6 +1058,7 @@ function toTradeTeam(saveId: string, teamId: string): TradeTeam {
       contract: p.contract,
       status: p.status,
       role: p.role,
+      satisfaction: p.satisfaction,
     }));
   const tk: TradePick[] = picks.map((p) => ({
     id: p.id.split(":").slice(1).join(":"),
@@ -1477,11 +1506,18 @@ export function runAiTradeMarket(saveId: string, diag?: Record<string, number>, 
     .filter((t) => t.id !== userFullId)
     .sort((a, b) => a.id.localeCompare(b.id));
   const winPct = (t: { wins: number; losses: number }) => (t.wins + t.losses > 0 ? t.wins / (t.wins + t.losses) : 0.5);
+  // A team hosting a disgruntled star becomes a seller even if it's winning —
+  // real GMs shop malcontents before the locker room (and asset) rots.
+  const disgruntledHosts = new Set(
+    db.select().from(playersT).where(eq(playersT.saveId, saveId)).all()
+      .filter((p) => p.teamId && (p.status === "ACTIVE" || p.status === "INJURED") && p.satisfaction < 35 && p.ratings.overall >= 75)
+      .map((p) => p.teamId as string),
+  );
   // Deadline mode classifies by live standings — aiPhase is only refreshed
   // at season rollover, so mid-season we read the table directly.
   const sellers = deadline
-    ? teamRows.filter((t) => winPct(t) < 0.4).sort((a, b) => winPct(a) - winPct(b))
-    : teamRows.filter((t) => t.aiPhase === "REBUILD").sort((a, b) => winPct(a) - winPct(b));
+    ? teamRows.filter((t) => winPct(t) < 0.4 || disgruntledHosts.has(t.id)).sort((a, b) => winPct(a) - winPct(b))
+    : teamRows.filter((t) => t.aiPhase === "REBUILD" || disgruntledHosts.has(t.id)).sort((a, b) => winPct(a) - winPct(b));
   const buyers = deadline
     ? teamRows.filter((t) => winPct(t) >= 0.55).sort((a, b) => winPct(b) - winPct(a))
     : teamRows.filter((t) => t.aiPhase === "CONTENDER" || t.aiPhase === "PLAYOFF").sort((a, b) => winPct(b) - winPct(a));
@@ -1496,8 +1532,15 @@ export function runAiTradeMarket(saveId: string, diag?: Record<string, number>, 
     if (used.has(sRow.id)) continue;
     const seller = toTradeTeam(saveId, shortOf(sRow.id));
     const vets = seller.players
-      .filter((p) => p.age >= 26 && p.ratings.overall >= 72 && !p.contract.noTrade && contractEndSeason(p.contract) >= season)
-      .sort((a, b) => playerValue(b, season).value - playerValue(a, season).value)
+      .filter((p) =>
+        !p.contract.noTrade && contractEndSeason(p.contract) >= season &&
+        ((p.age >= 26 && p.ratings.overall >= 72) || ((p.satisfaction ?? 70) < 35 && p.ratings.overall >= 75)),
+      )
+      // Disgruntled players get shopped first — they're why the phone rings.
+      .sort((a, b) =>
+        ((b.satisfaction ?? 70) < 35 ? 1 : 0) - ((a.satisfaction ?? 70) < 35 ? 1 : 0) ||
+        playerValue(b, season).value - playerValue(a, season).value,
+      )
       .slice(0, 3);
     if (!vets.length) { bump("no_vets"); continue; }
 
@@ -1624,8 +1667,14 @@ export function runAiTradeMarket(saveId: string, diag?: Record<string, number>, 
         if (used.has(sRow.id) || offerMade) continue;
         const seller = toTradeTeam(saveId, shortOf(sRow.id));
         const sellerVets = seller.players
-          .filter((p) => p.age >= 26 && p.ratings.overall >= 72 && !p.contract.noTrade && contractEndSeason(p.contract) >= season && needPremium(user, p) > 0)
-          .sort((a, b) => playerValue(b, season).value - playerValue(a, season).value);
+          .filter((p) =>
+            !p.contract.noTrade && contractEndSeason(p.contract) >= season && needPremium(user, p) > 0 &&
+            ((p.age >= 26 && p.ratings.overall >= 72) || ((p.satisfaction ?? 70) < 35 && p.ratings.overall >= 75)),
+          )
+          .sort((a, b) =>
+            ((b.satisfaction ?? 70) < 35 ? 1 : 0) - ((a.satisfaction ?? 70) < 35 ? 1 : 0) ||
+            playerValue(b, season).value - playerValue(a, season).value,
+          );
         if (!sellerVets.length) { bump("offer_no_vet"); continue; }
         // The ask: user's salary-matched pieces (+ a 1st if needed). Never ask
         // for the user's top-3 players. Try each vet — the best one may be

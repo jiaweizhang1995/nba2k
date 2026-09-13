@@ -393,3 +393,44 @@ describe("inbound trade offers", () => {
     expect(res.validation?.issues.some((i) => i.code === "WINDOW")).toBe(true);
   }, 120_000);
 });
+
+describe("morale has teeth: monthly drift + disgruntled discount", () => {
+  const mkP = (id: string, overall: number, satisfaction: number, teamId = "A", age = 27) => ({
+    id, name: id, teamId, lastTeamId: teamId, position: "SG", age, yearsPro: 5, tenure: 2,
+    ratings: { overall } as never,
+    seasonStats: [], contract: { type: "VETERAN" as const, years: [{ season: 2027, salary: 10 }], birdRights: false, noTrade: false, option: null, signedSeason: 2025 },
+    status: "ACTIVE", role: "STARTER", satisfaction, injury: null,
+    development: { trajectory: "STABLE", growthLeft: 0, lastDelta: 0 }, stamina: 1, lastGameDate: null,
+  });
+
+  it("a losing month erodes stars in real time; winning heals", async () => {
+    const { applyMonthlyMorale } = await import("@/domain/sim/season");
+    const teams = [
+      { id: "A", abbr: "A", city: "A", name: "A", conference: "EAST" as const, division: "x", wins: 5, losses: 25 },   // .167 — bleeding
+      { id: "B", abbr: "B", city: "B", name: "B", conference: "WEST" as const, division: "x", wins: 24, losses: 6 },  // .800 — healing
+    ];
+    const players = [
+      mkP("loser-star", 84, 50, "A", 30),
+      mkP("loser-buried", 81, 50, "A"),
+      // 9 higher-rated teammates push loser-buried to rank 10
+      ...Array.from({ length: 9 }, (_, i) => mkP(`a${i}`, 82, 50, "A")),
+      mkP("winner", 80, 50, "B"),
+    ];
+    const state = { saveId: "s", seed: 1, season: 2027, phase: "REGULAR_SEASON", currentDate: "2026-12-01", teams, players, games: [], playoffs: null } as never;
+    const shifts = applyMonthlyMorale(state);
+    const by = Object.fromEntries(shifts.map((s) => [s.playerId, s.to - s.from]));
+    expect(by["loser-star"]).toBe(-4);                 // 84ov on a .167 team
+    expect(by["loser-buried"]).toBe(-5);               // losing -2 (<82) + buried -3
+    expect(by["winner"]).toBe(2);                      // .800 heals slowly
+  });
+
+  it("a disgruntled star is worth less — the league smells blood", async () => {
+    const { playerValue } = await import("@/domain/trade");
+    const happy = mkP("s", 84, 70);
+    const mad = { ...mkP("s", 84, 25), satisfaction: 25 };
+    const vHappy = playerValue(happy, 2027).value;
+    const vMad = playerValue(mad, 2027).value;
+    expect(vMad / vHappy).toBeCloseTo(0.8, 2);
+    expect(playerValue(mad, 2027).breakdown.join(" ")).toContain("逼宫");
+  });
+});
