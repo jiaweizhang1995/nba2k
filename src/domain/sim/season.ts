@@ -1,0 +1,548 @@
+// Season-level simulation: schedule, day/week advancement, playoffs,
+// development, awards. Pure functions over a plain LeagueState — no DB here.
+
+import { rngFor } from "../rng";
+import { simulateGame, type SimPlayer } from "./game";
+import type { SeasonPhase, GameType } from "../types";
+
+export const SEASON_SIM_VERSION = "SEASON-SIM v1.0";
+
+export interface LeagueTeam {
+  id: string;
+  abbr: string;
+  city: string;
+  name: string;
+  conference: "EAST" | "WEST";
+  division: string;
+  wins: number;
+  losses: number;
+}
+
+export interface LeaguePlayer {
+  id: string;
+  name: string;
+  teamId: string | null;
+  position: string;
+  age: number;
+  yearsPro: number;
+  tenure: number;
+  ratings: { overall: number; threePoint: number; finishing: number; inside: number; freeThrow: number; playmaking: number; rebounding: number; perimeterD: number; interiorD: number; usageTendency: number; potential: number | null; potentialLow: number | null; potentialHigh: number | null; confidence: number };
+  seasonStats: { g: number; mp: number; pts: number; reb: number; ast: number; stl: number; blk: number; tov: number; fgm: number; fga: number; tpm: number; tpa: number; ftm: number; fta: number }[];
+  contract: { years: { season: number; salary: number }[]; type: string };
+  status: string;
+  role: string;
+  satisfaction: number;
+  injury: { description: string; weeksRemaining: number; severity: "MINOR" | "MODERATE" | "SEVERE" } | null;
+  development: { trajectory: string; growthLeft: number; lastDelta: number };
+  stamina: number;
+  lastGameDate: string | null;
+}
+
+export interface LeagueGame {
+  id: string;
+  date: string;
+  season: number;
+  type: GameType;
+  round?: string | null;
+  seriesId?: string | null;
+  gameNo?: number | null;
+  homeTeamId: string;
+  awayTeamId: string;
+  homeScore: number | null;
+  awayScore: number | null;
+  status: "SCHEDULED" | "FINAL";
+  box?: unknown | null;
+}
+
+export interface SeriesState {
+  id: string;
+  round: "R1" | "CONF_SEMI" | "CONF_FINAL" | "FINALS";
+  conference?: "EAST" | "WEST" | null;
+  aTeamId: string;
+  bTeamId: string;
+  winsA: number;
+  winsB: number;
+  gamesPlayed: number;
+  done: boolean;
+  winnerId: string | null;
+  nextGameDate: string;
+}
+
+export interface PlayoffState {
+  series: SeriesState[];
+  championTeamId: string | null;
+}
+
+export interface LeagueState {
+  saveId: string;
+  seed: number;
+  season: number; // label, e.g. 2027 for 2026-27
+  phase: SeasonPhase;
+  currentDate: string;
+  teams: LeagueTeam[];
+  players: LeaguePlayer[];
+  games: LeagueGame[];
+  playoffs: PlayoffState | null;
+}
+
+export const SEASON_START_MONTH_DAY = "-10-21";
+export const SEASON_GAMES_PER_TEAM = 82;
+
+function isoAddDays(iso: string, days: number): string {
+  const d = new Date(iso + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+/** Deterministic 82-game schedule for 30 teams via circle method + extras. */
+export function createSchedule(state: LeagueState): LeagueGame[] {
+  const rng = rngFor(state.seed, `schedule:${state.season}`);
+  const teamIds = state.teams.map((t) => t.id);
+  if (teamIds.length % 2 !== 0) throw new Error("schedule requires even team count");
+  const n = teamIds.length;
+
+  // Circle method rounds: each team plays every other once (n-1 rounds).
+  const rotation = [...teamIds];
+  const rounds: { home: string; away: string }[][] = [];
+  for (let r = 0; r < n - 1; r++) {
+    const pairs: { home: string; away: string }[] = [];
+    for (let i = 0; i < n / 2; i++) {
+      const a = rotation[i];
+      const b = rotation[n - 1 - i];
+      if (r % 2 === 0) pairs.push({ home: a, away: b });
+      else pairs.push({ home: b, away: a });
+    }
+    rounds.push(pairs);
+    rotation.splice(1, 0, rotation.pop()!);
+  }
+  // Reversed home/away: another n-1 rounds.
+  for (const pairs of rounds.slice(0, n - 1)) {
+    rounds.push(pairs.map((p) => ({ home: p.away, away: p.home })));
+  }
+  // Extra rounds to reach 82 games per team: 82/2 = 41 halves; 2*(n-1) rounds
+  // already give 58 games/team, so add SEASON_GAMES_PER_TEAM - 2*(n-1) more.
+  const extraRounds = SEASON_GAMES_PER_TEAM - 2 * (n - 1);
+  for (let r = 0; r < extraRounds; r++) {
+    const shuffled = rng.shuffle(teamIds);
+    const pairs: { home: string; away: string }[] = [];
+    for (let i = 0; i < n / 2; i++) {
+      const a = shuffled[i];
+      const b = shuffled[n - 1 - i];
+      if (r % 2 === 0) pairs.push({ home: a, away: b });
+      else pairs.push({ home: b, away: a });
+    }
+    rounds.push(pairs);
+  }
+
+  const startDate = `${state.season - 1}${SEASON_START_MONTH_DAY}`;
+  const busy = new Map<string, Set<string>>(); // date -> teamIds playing that day
+  const teamFree = (date: string, teamId: string) => {
+    const set = busy.get(date);
+    return !set || !set.has(teamId);
+  };
+  const mark = (date: string, a: string, b: string) => {
+    if (!busy.has(date)) busy.set(date, new Set());
+    busy.get(date)!.add(a);
+    busy.get(date)!.add(b);
+  };
+
+  const out: LeagueGame[] = [];
+  let gi = 0;
+  let day = 0;
+  for (const pairs of rounds) {
+    for (const p of rng.shuffle(pairs)) {
+      let offset = day;
+      for (;;) {
+        const date = isoAddDays(startDate, offset);
+        if (teamFree(date, p.home) && teamFree(date, p.away)) {
+          mark(date, p.home, p.away);
+          out.push({
+            id: `g-${state.season}-${gi++}`,
+            date,
+            season: state.season,
+            type: "REGULAR",
+            homeTeamId: p.home,
+            awayTeamId: p.away,
+            homeScore: null,
+            awayScore: null,
+            status: "SCHEDULED",
+            box: null,
+            round: null,
+            seriesId: null,
+            gameNo: null,
+          });
+          break;
+        }
+        offset++;
+      }
+    }
+    day += 2; // roughly one round every two calendar days
+  }
+  return out;
+}
+
+function toSimPlayer(p: LeaguePlayer): SimPlayer {
+  return {
+    id: p.id,
+    name: p.name,
+    position: p.position as SimPlayer["position"],
+    ratings: {
+      overall: p.ratings.overall,
+      inside: p.ratings.inside,
+      finishing: p.ratings.finishing,
+      threePoint: p.ratings.threePoint,
+      freeThrow: p.ratings.freeThrow,
+      playmaking: p.ratings.playmaking,
+      rebounding: p.ratings.rebounding,
+      perimeterD: p.ratings.perimeterD,
+      interiorD: p.ratings.interiorD,
+    },
+    usageTendency: p.ratings.usageTendency,
+    role: p.role,
+    injury: p.injury && p.injury.weeksRemaining > 0 ? { weeksRemaining: p.injury.weeksRemaining, severity: p.injury.severity } : null,
+    stamina: p.stamina,
+  };
+}
+
+export interface DayReport {
+  date: string;
+  gamesPlayed: number;
+  results: { gameId: string; home: string; away: string; homeScore: number; awayScore: number }[];
+  injuries: { playerId: string; name: string; description: string; weeks: number }[];
+  notes: string[];
+}
+
+/** Advance exactly one calendar day. Returns a report of what happened. */
+export function advanceDay(state: LeagueState): DayReport {
+  const report: DayReport = { date: state.currentDate, gamesPlayed: 0, results: [], injuries: [], notes: [] };
+  if (state.phase === "REGULAR_SEASON") {
+    const todays = state.games.filter((g) => g.status === "SCHEDULED" && g.date === state.currentDate);
+    for (const g of todays) {
+      simAndApply(state, g, report);
+    }
+    tickDaily(state, report);
+    state.currentDate = isoAddDays(state.currentDate, 1);
+    maybeEndRegularSeason(state, report);
+  } else if (state.phase === "PLAYOFFS") {
+    advancePlayoffDay(state, report);
+    tickDaily(state, report);
+    state.currentDate = isoAddDays(state.currentDate, 1);
+  } else if (state.phase === "OFFSEASON" || state.phase === "FREE_AGENCY" || state.phase === "DRAFT") {
+    tickDaily(state, report);
+    state.currentDate = isoAddDays(state.currentDate, 1);
+  }
+  return report;
+}
+
+function simAndApply(state: LeagueState, g: LeagueGame, report: DayReport) {
+  const home = state.teams.find((t) => t.id === g.homeTeamId)!;
+  const away = state.teams.find((t) => t.id === g.awayTeamId)!;
+  const homePlayers = state.players.filter((p) => p.teamId === home.id && (p.status === "ACTIVE" || p.status === "INJURED"));
+  const awayPlayers = state.players.filter((p) => p.teamId === away.id && (p.status === "ACTIVE" || p.status === "INJURED"));
+  const backToBackHome = state.games.some((x) => x.status === "FINAL" && x.date === isoAddDays(state.currentDate, -1) && (x.homeTeamId === home.id || x.awayTeamId === home.id));
+  const backToBackAway = state.games.some((x) => x.status === "FINAL" && x.date === isoAddDays(state.currentDate, -1) && (x.homeTeamId === away.id || x.awayTeamId === away.id));
+  const result = simulateGame(
+    { id: home.id, name: home.name, players: homePlayers.map(toSimPlayer) },
+    { id: away.id, name: away.name, players: awayPlayers.map(toSimPlayer) },
+    {
+      seed: state.seed,
+      salt: `game:${g.id}:${g.date}`,
+      playoff: g.type === "PLAYOFF",
+      backToBackHome,
+      backToBackAway,
+    },
+  );
+
+  g.homeScore = result.homeScore;
+  g.awayScore = result.awayScore;
+  g.status = "FINAL";
+  g.box = result.box;
+  if (g.homeScore >= g.awayScore) {
+    home.wins++;
+    away.losses++;
+  } else {
+    away.wins++;
+    home.losses++;
+  }
+
+  // Apply box to player season stats.
+  const byId = new Map(state.players.map((p) => [p.id, p]));
+  for (const l of [...result.box.home, ...result.box.away]) {
+    const p = byId.get(l.playerId);
+    if (!p) continue;
+    let s = p.seasonStats[0];
+    if (!s) {
+      s = { g: 0, mp: 0, pts: 0, reb: 0, ast: 0, stl: 0, blk: 0, tov: 0, fgm: 0, fga: 0, tpm: 0, tpa: 0, ftm: 0, fta: 0 };
+      p.seasonStats = [s];
+    }
+    s.g++;
+    s.mp += l.mp;
+    s.pts += l.pts;
+    s.reb += l.reb;
+    s.ast += l.ast;
+    s.stl += l.stl;
+    s.blk += l.blk;
+    s.tov += l.tov;
+    s.fgm += l.fgm;
+    s.fga += l.fga;
+    s.tpm += l.tpm;
+    s.tpa += l.tpa;
+    s.ftm += l.ftm;
+    s.fta += l.fta;
+    p.lastGameDate = g.date;
+    p.stamina = Math.max(0.45, p.stamina - l.mp / 600);
+  }
+
+  // Injuries: per team per game, weighted by minutes and age.
+  const injRng = rngFor(state.seed, `injury:${g.id}`);
+  for (const teamPlayers of [homePlayers, awayPlayers]) {
+    if (!injRng.chance(0.16)) continue;
+    const candidates = teamPlayers.filter((p) => p.status === "ACTIVE");
+    if (!candidates.length) continue;
+    const victim = injRng.weighted(candidates, (p) => (p.age / 26) * Math.pow(Math.max(20, p.ratings.overall) / 55, 1.5));
+    const roll = injRng.next();
+    const severity = roll < 0.68 ? "MINOR" : roll < 0.92 ? "MODERATE" : "SEVERE";
+    const weeks = severity === "MINOR" ? injRng.int(1, 2) : severity === "MODERATE" ? injRng.int(3, 6) : injRng.int(7, 14);
+    const description = injRng.pick(["脚踝扭伤", "腿筋拉伤", "膝盖酸痛", "肩部挫伤", "手指骨折", "腹股沟拉伤", "背部痉挛"]);
+    victim.injury = { description, weeksRemaining: weeks, severity };
+    victim.status = "INJURED";
+    report.injuries.push({ playerId: victim.id, name: victim.name, description, weeks });
+  }
+
+  report.gamesPlayed++;
+  report.results.push({ gameId: g.id, home: home.abbr, away: away.abbr, homeScore: result.homeScore, awayScore: result.awayScore });
+}
+
+function tickDaily(state: LeagueState, report: DayReport) {
+  for (const p of state.players) {
+    // fatigue recovery
+    if (p.lastGameDate !== state.currentDate) p.stamina = Math.min(1, p.stamina + 0.25);
+    // injury countdown
+    if (p.injury && p.injury.weeksRemaining > 0) {
+      p.injury.weeksRemaining -= 1 / 7; // day-based countdown in weeks
+      if (p.injury.weeksRemaining <= 0) {
+        p.injury = null;
+        if (p.status === "INJURED") p.status = "ACTIVE";
+        report.notes.push(`${p.name} 伤愈复出`);
+      }
+    }
+  }
+}
+
+function maybeEndRegularSeason(state: LeagueState, report: DayReport) {
+  const remaining = state.games.filter((g) => g.status === "SCHEDULED").length;
+  if (remaining > 0) return;
+  report.notes.push("常规赛结束，进入季后赛");
+  startPlayoffs(state, report);
+}
+
+function seedConference(state: LeagueState, conf: "EAST" | "WEST"): LeagueTeam[] {
+  return state.teams
+    .filter((t) => t.conference === conf)
+    .sort((a, b) => b.wins - a.wins || (a.abbr < b.abbr ? -1 : 1))
+    .slice(0, 8);
+}
+
+function startPlayoffs(state: LeagueState, report: DayReport) {
+  state.phase = "PLAYOFFS";
+  const series: SeriesState[] = [];
+  const start = isoAddDays(state.currentDate, 1);
+  const mk = (round: SeriesState["round"], conf: "EAST" | "WEST" | null, a: string, b: string, i: number): SeriesState => ({
+    id: `s-${state.season}-${round}-${conf ?? "F"}-${i}`,
+    round,
+    conference: conf,
+    aTeamId: a,
+    bTeamId: b,
+    winsA: 0,
+    winsB: 0,
+    gamesPlayed: 0,
+    done: false,
+    winnerId: null,
+    nextGameDate: start,
+  });
+  for (const conf of ["EAST", "WEST"] as const) {
+    const seeds = seedConference(state, conf);
+    series.push(mk("R1", conf, seeds[0].id, seeds[7].id, 1), mk("R1", conf, seeds[3].id, seeds[4].id, 2), mk("R1", conf, seeds[1].id, seeds[6].id, 3), mk("R1", conf, seeds[2].id, seeds[5].id, 4));
+  }
+  state.playoffs = { series, championTeamId: null };
+  report.notes.push("季后赛对阵已生成");
+}
+
+function scheduleSeriesGame(state: LeagueState, s: SeriesState) {
+  // Best-of-7: home pattern A,A,B,B,A,B,A by game number.
+  const gameNo = s.gamesPlayed + 1;
+  const homeFirst = [true, true, false, false, true, false, true][gameNo - 1] ?? true;
+  const g: LeagueGame = {
+    id: `${s.id}-g${gameNo}`,
+    date: s.nextGameDate,
+    season: state.season,
+    type: "PLAYOFF",
+    round: s.round,
+    seriesId: s.id,
+    gameNo,
+    homeTeamId: homeFirst ? s.aTeamId : s.bTeamId,
+    awayTeamId: homeFirst ? s.bTeamId : s.aTeamId,
+    homeScore: null,
+    awayScore: null,
+    status: "SCHEDULED",
+    box: null,
+  };
+  state.games.push(g);
+  s.nextGameDate = isoAddDays(s.nextGameDate, 2);
+}
+
+function advancePlayoffDay(state: LeagueState, report: DayReport) {
+  const po = state.playoffs;
+  if (!po || po.championTeamId) return;
+  const todays = state.games.filter((g) => g.type === "PLAYOFF" && g.status === "SCHEDULED" && g.date === state.currentDate);
+  for (const g of todays) {
+    const s = po.series.find((x) => x.id === g.seriesId);
+    if (!s) continue;
+    simAndApply(state, g, report);
+    if (g.homeScore == null || g.awayScore == null) continue;
+    const aWon = g.homeTeamId === s.aTeamId ? g.homeScore > g.awayScore : g.awayScore > g.homeScore;
+    if (aWon) s.winsA++;
+    else s.winsB++;
+    s.gamesPlayed++;
+    if (s.winsA === 4 || s.winsB === 4) {
+      s.done = true;
+      s.winnerId = s.winsA === 4 ? s.aTeamId : s.bTeamId;
+      report.notes.push(`系列赛结束：${teamAbbr(state, s.winnerId)} 晋级/夺冠`);
+    }
+  }
+  // schedule next games for unfinished series
+  for (const s of po.series) {
+    if (!s.done && !state.games.some((g) => g.seriesId === s.id && g.status === "SCHEDULED")) {
+      scheduleSeriesGame(state, s);
+    }
+  }
+  maybeAdvanceRound(state, report);
+}
+
+function maybeAdvanceRound(state: LeagueState, report: DayReport) {
+  const po = state.playoffs!;
+
+  const nextRoundMap: Record<string, SeriesState["round"]> = { R1: "CONF_SEMI", CONF_SEMI: "CONF_FINAL", CONF_FINAL: "FINALS" };
+  for (const round of ["R1", "CONF_SEMI", "CONF_FINAL"] as const) {
+    const seriesOfRound = po.series.filter((s) => s.round === round);
+    if (seriesOfRound.length === 0 || !seriesOfRound.every((s) => s.done)) continue;
+    const next = nextRoundMap[round];
+    if (po.series.some((s) => s.round === next)) continue; // next round already created
+
+    const mkSeries = (r: SeriesState["round"], conf: "EAST" | "WEST" | null, a: string, b: string): SeriesState => ({
+      id: `s-${state.season}-${r}-${conf ?? "F"}-${po.series.length}`,
+      round: r,
+      conference: conf,
+      aTeamId: a,
+      bTeamId: b,
+      winsA: 0,
+      winsB: 0,
+      gamesPlayed: 0,
+      done: false,
+      winnerId: null,
+      nextGameDate: isoAddDays(state.currentDate, 2),
+    });
+
+    if (next === "FINALS") {
+      const winners = seriesOfRound.map((s) => s.winnerId!);
+      if (winners.length !== 2) return; // need exactly two conference champions
+      po.series.push(mkSeries("FINALS", null, winners[0], winners[1]));
+      report.notes.push("总决赛对阵确定");
+      return;
+    }
+    // In-conference bracket advancement.
+    for (const conf of ["EAST", "WEST"] as const) {
+      const confWinners = seriesOfRound.filter((s) => s.conference === conf).map((s) => s.winnerId!);
+      for (let i = 0; i + 1 < confWinners.length; i += 2) {
+        po.series.push(mkSeries(next, conf, confWinners[i], confWinners[i + 1]));
+      }
+    }
+    report.notes.push(`${next} 对阵确定`);
+    return;
+  }
+  // Finals done?
+  const finals = po.series.find((s) => s.round === "FINALS");
+  if (finals?.done && finals.winnerId) {
+    po.championTeamId = finals.winnerId;
+    report.notes.push(`总冠军诞生：${teamName(state, finals.winnerId)}`);
+    endSeason(state, report, finals.winnerId);
+  }
+}
+
+function teamAbbr(state: LeagueState, id: string): string {
+  return state.teams.find((t) => t.id === id)?.abbr ?? "?";
+}
+function teamName(state: LeagueState, id: string): string {
+  const t = state.teams.find((x) => x.id === id);
+  return t ? `${t.city} ${t.name}` : "?";
+}
+
+export function seasonScore(p: LeaguePlayer): number {
+  const s = p.seasonStats[0];
+  if (!s || s.g < 10) return 0;
+  const perG = (v: number) => v / s.g;
+  return perG(s.pts) * 1.0 + perG(s.reb) * 1.1 + perG(s.ast) * 1.5 + perG(s.stl) * 2 + perG(s.blk) * 2;
+}
+
+function endSeason(state: LeagueState, report: DayReport, championId: string) {
+  state.phase = "OFFSEASON";
+  const champ = state.teams.find((t) => t.id === championId);
+  if (champ) champ.wins = champ.wins; // record already accumulated
+  report.notes.push(`赛季 ${state.season - 1}-${String(state.season).slice(2)} 结束，冠军：${teamName(state, championId)}`);
+}
+
+/** Standings: sorted by conference then division. */
+export function standings(state: LeagueState) {
+  const byConf = (conf: "EAST" | "WEST") =>
+    state.teams
+      .filter((t) => t.conference === conf)
+      .map((t) => ({ ...t, winPct: t.wins + t.losses > 0 ? t.wins / (t.wins + t.losses) : 0 }))
+      .sort((a, b) => b.winPct - a.winPct || b.wins - a.wins || (a.abbr < b.abbr ? -1 : 1));
+  return { EAST: byConf("EAST"), WEST: byConf("WEST") };
+}
+
+/** Offseason development: growth/decline by age & potential. Deterministic. */
+export function applyDevelopment(state: LeagueState): { playerId: string; name: string; delta: number }[] {
+  const out: { playerId: string; name: string; delta: number }[] = [];
+  for (const p of state.players) {
+    if (p.status === "RETIRED") continue;
+    const rng = rngFor(state.seed, `dev:${state.season}:${p.id}`);
+    const overall = p.ratings.overall;
+    const pot = p.ratings.potential;
+    let delta = 0;
+    if (p.age <= 24 && pot != null) {
+      const gap = Math.max(0, Math.min(20, pot - overall));
+      delta = rng.chance(0.25 + gap * 0.05) ? rng.int(1, Math.max(1, Math.round(gap / 2))) : rng.int(-1, 1);
+    } else if (p.age <= 28) {
+      delta = rng.chance(0.4) ? rng.int(0, 2) : rng.int(-1, 0);
+    } else if (p.age >= 32) {
+      delta = rng.chance(0.75) ? -rng.int(1, p.age >= 35 ? 4 : 2) : 0;
+    }
+    delta = Math.max(-6, Math.min(5, delta));
+    const r = p.ratings;
+    const newOverall = Math.max(25, Math.min(99, overall + delta));
+    const shift = (v: number) => Math.max(25, Math.min(99, v + delta));
+    p.ratings = {
+      ...r,
+      overall: newOverall,
+      inside: shift(r.inside),
+      finishing: shift(r.finishing),
+      threePoint: shift(r.threePoint),
+      freeThrow: shift(r.freeThrow),
+      playmaking: shift(r.playmaking),
+      rebounding: shift(r.rebounding),
+      perimeterD: shift(r.perimeterD),
+      interiorD: shift(r.interiorD),
+    };
+    p.development = {
+      trajectory: delta > 0 ? "GROWING" : delta < 0 ? "DECLINING" : "STABLE",
+      growthLeft: Math.max(0, (pot ?? newOverall) - newOverall),
+      lastDelta: delta,
+    };
+    p.age += 1;
+    p.yearsPro += 1;
+    p.tenure += 1;
+    if (delta !== 0) out.push({ playerId: p.id, name: p.name, delta });
+  }
+  return out;
+}

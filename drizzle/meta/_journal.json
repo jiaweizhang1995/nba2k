@@ -1,0 +1,34 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1789239485789,
+      "tag": "0000_jazzy_komodo",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1789270504823,
+      "tag": "0001_robust_dark_phoenix",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1789277598697,
+      "tag": "0002_glamorous_kitty_pryde",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1789277981189,
+      "tag": "0003_moaning_slayback",
+      "breakpoints": true
+    }
+  ]
+}

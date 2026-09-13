@@ -1,0 +1,1 @@
+ALTER TABLE `saves` ADD `is_eval` integer DEFAULT false NOT NULL;

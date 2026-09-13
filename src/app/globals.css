@@ -1,26 +1,177 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg: #0b1220;
+  --bg-panel: #111a2e;
+  --bg-panel2: #16223c;
+  --border: #24324f;
+  --text: #e2e8f0;
+  --text-dim: #94a3b8;
+  --accent: #38bdf8;
+  --good: #34d399;
+  --warn: #fbbf24;
+  --bad: #f87171;
+  --god: #ef4444;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html,
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.panel-2 {
+  background: var(--bg-panel2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-panel2);
+  color: var(--text);
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s;
+  white-space: nowrap;
+}
+.btn:hover {
+  background: #1d2b4a;
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #06121f;
+  font-weight: 600;
+}
+.btn-primary:hover {
+  background: #7dd3fc;
+}
+.btn-danger {
+  background: #7f1d1d;
+  border-color: #b91c1c;
+  color: #fecaca;
+}
+.btn-danger:hover {
+  background: #991b1b;
+}
+.btn-god {
+  background: var(--god);
+  border-color: var(--god);
+  color: #fff;
+  font-weight: 700;
+}
+
+.input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 6px 10px;
+  font-size: 13px;
+  width: 100%;
+}
+.input:focus {
+  outline: 1px solid var(--accent);
+}
+
+table.data {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+table.data th {
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 600;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  background: var(--bg-panel);
+  z-index: 1;
+}
+table.data td {
+  padding: 6px 8px;
+  border-bottom: 1px solid #1a2440;
+  white-space: nowrap;
+}
+table.data tr:hover td {
+  background: #131f38;
+}
+
+.tag {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.tag-demo {
+  background: #451a03;
+  border-color: #b45309;
+  color: #fcd34d;
+  font-weight: 600;
+}
+.tag-god {
+  background: #450a0a;
+  border-color: #dc2626;
+  color: #fca5a5;
+  font-weight: 700;
+  animation: godPulse 1.6s infinite;
+}
+@keyframes godPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.72; }
+}
+.tag-imported {
+  background: #052e16;
+  border-color: #15803d;
+  color: #86efac;
+}
+
+.bar {
+  height: 6px;
+  border-radius: 3px;
+  background: #1e293b;
+  overflow: hidden;
+}
+.bar > div {
+  height: 100%;
+  border-radius: 3px;
+}
+
+.scrollbox {
+  overflow: auto;
+}
+.scrollbox::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scrollbox::-webkit-scrollbar-thumb {
+  background: #24324f;
+  border-radius: 4px;
 }
