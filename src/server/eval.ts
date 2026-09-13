@@ -235,6 +235,9 @@ function teamRoster(evalRow: { saveId: string; teamFullId: string; season?: numb
       expiring: endSeason <= season,
       injured: !!(p.injury && p.injury.weeksRemaining > 0),
       noTrade: p.contract.noTrade,
+      // Morale signal: losing teams and buried talent erode satisfaction;
+      // a disgruntled star is a trade-demand waiting to happen.
+      morale: p.satisfaction <= 40 ? "UNHAPPY" : p.satisfaction <= 58 ? "UNEASY" : "CONTENT",
     };
   });
 }
@@ -604,7 +607,8 @@ const SYSTEM_PROMPT = `你是篮球经理模拟游戏《HARDWOOD GM》中的球�
 - 休赛期阵容可到 20 人，但常规赛开打前必须裁到 18 人以内，否则 start_new_season 会被拒绝。
 - 工资帽规则：超帽只能用中产特例（≤12.8M/年，每个休赛期全队仅一次，cap.mleUsed 可查是否已用）或底薪（≤1.2M/年）；超第一土豪线失去中产，超第二土豪线只能底薪。
 - 裁员后剩余合同变为死钱仍占工资帽——裁大合同要三思。
-- 交易在 SEASON/DRAFT/FREE_AGENCY 阶段均可提议；get_market 可查看全联盟各队的 phase（CONTENDER/PLAYOFF/BUBBLE/REBUILD）、薪资空间与核心球员，用于挑选交易对象。`;
+- roster[].morale 反映球员士气：输球文化和被埋没的天赋会让球星 UNHAPPY——不处理可能贬值甚至逼宫。
+- 交易在 SEASON/DRAFT/FREE_AGENCY 阶段均可提议，但常规赛交易窗口在 2 月 6 日截止日关闭（之后只能等到休赛期）；get_market 可查看全联盟各队的 phase（CONTENDER/PLAYOFF/BUBBLE/REBUILD）、薪资空间与核心球员，用于挑选交易对象。`;
 
 interface StepOutcome {
   status: string;

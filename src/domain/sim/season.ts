@@ -291,6 +291,7 @@ function toSimPlayer(p: LeaguePlayer): SimPlayer {
     role: p.role,
     injury: p.injury && p.injury.weeksRemaining > 0 ? { weeksRemaining: p.injury.weeksRemaining, severity: p.injury.severity } : null,
     stamina: p.stamina,
+    morale: p.satisfaction,
   };
 }
 
@@ -599,6 +600,16 @@ export function standings(state: LeagueState) {
 /** Offseason development: growth/decline by age & potential. Deterministic. */
 export function applyDevelopment(state: LeagueState): { playerId: string; name: string; delta: number }[] {
   const out: { playerId: string; name: string; delta: number }[] = [];
+  // Team win% for morale: losing grates on veterans and stars; winning heals.
+  const winPctByTeam = new Map(state.teams.map((t) => [t.id, (t.wins + t.losses) > 0 ? t.wins / (t.wins + t.losses) : 0.5]));
+  // Per-team overall ranking so we can spot stars buried on the bench.
+  const rankInTeam = new Map<string, number>();
+  for (const t of state.teams) {
+    state.players
+      .filter((p) => p.teamId === t.id)
+      .sort((a, b) => b.ratings.overall - a.ratings.overall)
+      .forEach((p, i) => rankInTeam.set(p.id, i));
+  }
   for (const p of state.players) {
     if (p.status === "RETIRED") continue;
     const rng = rngFor(state.seed, `dev:${state.season}:${p.id}`);
@@ -634,6 +645,18 @@ export function applyDevelopment(state: LeagueState): { playerId: string; name: 
       growthLeft: Math.max(0, (pot ?? newOverall) - newOverall),
       lastDelta: delta,
     };
+    // Morale drift: losing wears on good players (esp. aging vets), a
+    // high-overall player stuck on the bench is unhappy, winning repairs.
+    if (p.teamId) {
+      const winPct = winPctByTeam.get(p.teamId) ?? 0.5;
+      const rank = rankInTeam.get(p.id) ?? 9;
+      let mood = 0;
+      if (winPct >= 0.55) mood += 4;
+      else if (winPct <= 0.35) mood -= p.ratings.overall >= 82 || p.age >= 31 ? 8 : 4;
+      if (newOverall >= 80 && rank >= 9) mood -= 9; // misused talent
+      if (newOverall >= 78 && rank <= 5) mood += 2; // featured role
+      if (mood !== 0) p.satisfaction = Math.max(15, Math.min(95, p.satisfaction + mood));
+    }
     p.age += 1;
     p.yearsPro += 1;
     p.tenure += 1;

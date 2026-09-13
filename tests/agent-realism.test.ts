@@ -9,6 +9,7 @@ import { players as playersT, teams as teamsT, events as eventsT } from "@/db/sc
 import {
   advanceSim,
   createSave,
+  executeTrade,
   getSave,
   listInboundOffers,
   makeDraftPick,
@@ -293,5 +294,23 @@ describe("inbound trade offers", () => {
     const res = respondInboundOffer(s.saveId, offer.id, true);
     expect(res.accepted).toBe(true);
     expect(listInboundOffers(s.saveId)).toHaveLength(0);
+  }, 120_000);
+
+  it("the trade window closes after Feb 6 — user trades get a WINDOW block", async () => {
+    const s = await createSave({ name: "deadline window", seed: 555006 });
+    for (let i = 0; i < 8; i++) {
+      await advanceSim(s.saveId, "MONTH");
+      const sv = getSave(s.saveId)!;
+      if ((sv.phaseState as Record<string, unknown>)[`deadlineMarket:${sv.season}`]) break;
+    }
+    const sv = getSave(s.saveId)!;
+    expect(sv.phase).toBe("REGULAR_SEASON");
+    expect(sv.currentDate > `${sv.season}-02-06`).toBe(true);
+    const res = executeTrade(s.saveId, [
+      { teamId: "SAC", gives: [{ kind: "PLAYER", id: "x" }], receives: [{ kind: "PLAYER", id: "y" }] },
+      { teamId: "LAL", gives: [{ kind: "PLAYER", id: "y" }], receives: [{ kind: "PLAYER", id: "x" }] },
+    ]);
+    expect(res.executed).toBe(false);
+    expect(res.validation?.issues.some((i) => i.code === "WINDOW")).toBe(true);
   }, 120_000);
 });

@@ -30,6 +30,7 @@ export interface SimPlayer {
   role: string;
   injury: { weeksRemaining: number; severity: string } | null;
   stamina: number; // 0-1, 1 = fresh; low stamina cuts minutes & performance
+  morale?: number; // 0-100 satisfaction; locker-room mood moves team efficiency
 }
 
 /** Manager-set rotation for one team: 5 starters + optional per-player minute targets. */
@@ -300,10 +301,18 @@ export function simulateGame(
     }
     return den > 0 ? num / den : 55;
   };
-  const hOff = teamSkill(homeSlots, "off");
-  const hDef = teamSkill(homeSlots, "def");
-  const aOff = teamSkill(awaySlots, "off");
-  const aDef = teamSkill(awaySlots, "def");
+  // Locker-room morale: minutes-weighted satisfaction nudges team efficiency
+  // (a miserable locker room plays a few points worse, a happy one sharper).
+  const teamMorale = (slots: Slot[]) => {
+    let num = 0, den = 0;
+    for (const s of slots) { num += (s.player.morale ?? 60) * s.plan; den += s.plan; }
+    return den > 0 ? num / den : 60;
+  };
+  const moraleBoost = (slots: Slot[]) => 1 + (teamMorale(slots) - 60) * 0.0012; // ±~5% at extremes
+  const hOff = teamSkill(homeSlots, "off") * moraleBoost(homeSlots);
+  const hDef = teamSkill(homeSlots, "def") * moraleBoost(homeSlots);
+  const aOff = teamSkill(awaySlots, "off") * moraleBoost(awaySlots);
+  const aDef = teamSkill(awaySlots, "def") * moraleBoost(awaySlots);
 
   // Pace: possessions per team per 48 min (NBA-like ≈ 100). Both teams' styles
   // meet in the middle; back-to-backs slow down; better offenses push a bit.

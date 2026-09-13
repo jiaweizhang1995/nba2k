@@ -1130,10 +1130,23 @@ export function requestTradeOffers(saveId: string, gives: { kind: "PLAYER" | "PI
 }
 
 /** Execute a validated trade (or force it via God Mode). */
-export function executeTrade(saveId: string, parties: TradeParty[], opts: { godMode?: boolean; force?: boolean; note?: string } = {}) {
+export function executeTrade(saveId: string, parties: TradeParty[], opts: { godMode?: boolean; force?: boolean; note?: string; allowPostDeadline?: boolean } = {}) {
   const db = getDb();
   const save = getSave(saveId);
   if (!save) throw new EngineError("NO_SAVE", "存档不存在");
+  // Trade window: open during REGULAR_SEASON until the Feb-6 deadline, and
+  // again through DRAFT/FREE_AGENCY/OFFSEASON. Closed during PLAYOFFS.
+  // AI market trades carry a note and run inside the window, so this only
+  // ever bites user/god trades outside it.
+  const isAiMarket = opts.note === "AI 交易截止日" || opts.note === "AI 休赛期交易";
+  if (!opts.godMode && !isAiMarket && !opts.allowPostDeadline) {
+    if (save.phase === "PLAYOFFS") {
+      return { executed: false as const, validation: { legal: false, issues: [{ code: "WINDOW", severity: "BLOCKER" as const, message: "季后赛期间交易窗口关闭" }], salaryCheck: [] } };
+    }
+    if (save.phase === "REGULAR_SEASON" && save.currentDate > `${save.season}-02-06`) {
+      return { executed: false as const, validation: { legal: false, issues: [{ code: "WINDOW", severity: "BLOCKER" as const, message: "交易截止日已过（2 月 6 日），本赛季交易窗口关闭" }], salaryCheck: [] } };
+    }
+  }
   const teams = parties.map((p) => toTradeTeam(saveId, p.teamId));
   const validation = validateTrade({ saveId, parties }, teams, save.season);
   if (!validation.legal && !(opts.godMode && opts.force)) {
@@ -1747,7 +1760,10 @@ export function respondInboundOffer(saveId: string, offerId: string, accept: boo
     logEvent(saveId, "TRADE", `接受报价失败：${msg}`, { offerId });
     return { accepted: false as const, reason: msg };
   }
-  const exec = executeTrade(saveId, parties, { note: "接受 AI 报价" });
+  // The offer was legal when made at the deadline; the GM answers the call
+  // after the sim has rolled past Feb 6, so the window check is bypassed —
+  // rule validation above still gates the actual exchange.
+  const exec = executeTrade(saveId, parties, { note: "接受 AI 报价", allowPostDeadline: true });
   clear();
   if (exec.executed) {
     return { accepted: true as const };
