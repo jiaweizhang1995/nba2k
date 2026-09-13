@@ -1570,7 +1570,10 @@ function updateAiPhases(saveId: string) {
   const db = getDb();
   const save = getSave(saveId)!;
   const season = save.season;
+  const userFull = String(getPhaseState(saveId).userTeamId ?? "");
   for (const t of db.select().from(teamsT).where(eq(teamsT.saveId, saveId)).all()) {
+    // The user's franchise is run by the agent — no AI personality label.
+    if (t.id === userFull) continue;
     const roster = db
       .select()
       .from(playersT)
