@@ -123,7 +123,10 @@ export function playerValue(p: TradePlayer, season: number): Valuation {
 }
 
 export function pickValue(pick: TradePick, season: number): Valuation {
-  let v = pick.round === 1 ? 14 : 4;
+  // Anchored to real NBA prices: an unprotected 1st is worth roughly a solid
+  // starter (~36 value points ≈ overall-79 player). The old 14-point price
+  // let superstars (~190) move for a pick plus fillers — pure fiction.
+  let v = pick.round === 1 ? 36 : 9;
   const breakdown = [`${pick.round === 1 ? "首轮" : "次轮"} ${pick.year} 年签基础 ${v} 点`];
   if (pick.year - season >= 4) {
     v *= 0.85;
@@ -340,7 +343,17 @@ export function aiEvaluateTrade(
   const threshold =
     team.aiPhase === "CONTENDER" ? -1 : team.aiPhase === "PLAYOFF" ? 0 : team.aiPhase === "BUBBLE" ? 2 : 4;
   // Risk tolerance shifts threshold slightly.
-  const tol = threshold - (team.aiRisk - 0.5) * 4;
+  let tol = threshold - (team.aiRisk - 0.5) * 4;
+
+  // Franchise-player surcharge: a team giving up a genuine star without
+  // getting one back demands real overpayment — picks + youngs at par isn't
+  // how superstars move. Scaled to how good the outgoing star is.
+  const outStar = Math.max(0, ...party.gives.filter((a) => a.kind === "PLAYER").map((a) => findPlayerGlobally(a.id)?.ratings.overall ?? 0));
+  const inStar = Math.max(0, ...party.receives.filter((a) => a.kind === "PLAYER").map((a) => findPlayerGlobally(a.id)?.ratings.overall ?? 0));
+  if (outStar >= 84 && inStar < outStar) {
+    tol += outStar >= 88 ? 16 : 9;
+    reasons.push(`送出 ${outStar} 评分球星要求超额回报（门槛 +${outStar >= 88 ? 16 : 9}）`);
+  }
   const accept = delta >= tol;
 
   const incomingStars = party.receives.filter((a) => {
@@ -406,6 +419,7 @@ export function generateTradeOffers(
 ): GeneratedOffer[] {
   const userTeam = teams.find((t) => t.id === userTeamId);
   if (!userTeam) return [];
+  const userSnap = capSnapshot(userTeam.players.map((p) => ({ contract: p.contract })), userTeam.players.length, userTeam.deadMoney ?? 0);
   const assetKey = [...userPackage.players, ...userPackage.picks].map((a) => a.id).sort().join("|");
   const userGives: OfferAssetRef[] = [
     ...userPackage.players.map((p) => ({ kind: "PLAYER" as const, id: p.id })),
@@ -488,7 +502,7 @@ export function generateTradeOffers(
       const pool = [...eligible];
       while (chosen.length < maxOut) {
         if (pkgSal >= minOut && pkgSal >= targetSal - 1.0) break;
-        if (pkgSal > round2(salaryRecv * CBA.tradeBand1 + 0.1)) break; // would break the user's own band
+        if (!salaryMatching(salaryRecv, pkgSal, userSnap).ok && pkgSal > 0 && salaryRecv > 0) break; // user's real band
         const remaining = Math.max(0, targetSal - pkgSal);
         const feasible = pool.filter((c) => pkgVal + c.v.value <= budget + 1.5);
         if (feasible.length === 0) break;
@@ -529,7 +543,7 @@ export function generateTradeOffers(
         }
       }
       if (chosen.length === 0 || chosen.length > maxOut || pkgSal < minOut) continue;
-      if (pkgSal > round2(salaryRecv * CBA.tradeBand1 + 0.1)) continue; // user's matching band
+      if (salaryRecv > 0 && !salaryMatching(salaryRecv, pkgSal, userSnap).ok) continue; // user's real band
 
       // Sweeten with future picks (up to one 1st + one 2nd) while the value
       // budget allows — picks don't count against roster size, so they are the
