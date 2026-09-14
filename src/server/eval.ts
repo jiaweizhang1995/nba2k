@@ -63,7 +63,7 @@ export function isActionAllowed(stage: string, action: GmAction): boolean {
   return (STAGE_ALLOWED_ACTIONS[stage] ?? []).includes(action);
 }
 const now = () => new Date().toISOString();
-const shortId = (full: string) => full.split(":").slice(1).join(":");
+const shortId = (full: string) => (full.includes(":") ? full.split(":").slice(1).join(":") : full);
 const MAX_TURNS = 600;
 
 export const SCORE_VERSION = "GM-BENCH v3";
@@ -717,7 +717,7 @@ const SYSTEM_PROMPT = `你是篮球经理模拟游戏《HARDWOOD GM》中的球�
 - set_rotation：params = { starters: [5 个球员 id], minutes?: {球员id: 分钟} }（设定首发与上场时间；伤停球员不能首发；轮换深度影响战绩与士气）
 - sign_free_agent：params = { playerId, years, avgSalary }（自由市场阶段按报价签约；常规赛期间只能签赛季剩余底薪合同，球员 id 来自 freeAgents[].id；注意 AI 球队也会在赛季中底薪补强伤病阵容——好货不等人）
 - waive_player：params = { playerId, stretch? }（裁掉我方球员；剩余合同变为死钱仍占工资帽；stretch=true 按延伸条款摊到 2×剩余年+1 个赛季——当年压力小但拖得久）
-- draft_pick：params = { prospectId? }（选秀阶段；prospectId 来自 topProspects[].id，省略则选最优）
+- draft_pick：params = { prospectId? }（选秀阶段；轮到你方签位时按 prospectId 选人，省略则选板上最优；轮到他人签位时本动作只推进选秀到你方签位前——需再调用一次完成选择）
 - finish_draft：剩余选秀全部自动完成
 - set_strategy：params = { text }（记录你的建队策略）
 - advance_season：推进赛程——常规赛按月推进（每回合约 30 天，可中途做交易/调整），季后赛一次性推完，阶段变化会暂停并返回最新盘面
