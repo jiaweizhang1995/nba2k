@@ -7,3 +7,7 @@ This version has breaking changes — APIs, conventions, and file structure may 
 This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
 
 <!-- END:nextjs-agent-rules -->
+
+## Playing the game as an agent
+
+To play this NBA GM simulator yourself via the AGENT eval provider (5-year scored run), read `docs/agent-playbook.md` — it has the CLI loop, action schema, stage rules, and hard-won pitfalls (draft two-step, Feb-6 deadline, 140% extension trap, bird rights).
