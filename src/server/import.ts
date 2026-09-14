@@ -190,10 +190,10 @@ export async function importData(saveId: string, payload: ImportPayload): Promis
           ratings.overall = 50;
         }
       } else if (salaryM && salaryM > 0) {
-        // 有统计但样本很小（边缘轮换、短时间 call-up）：统计公式会被极低
-        // 分钟数拉爆，按置信度混入市场估值，避免 2 分钟样本评出 25 分。
-        const sampleMpg = perGame?.mpg ?? (statLine.g > 0 ? statLine.mp / statLine.g : 99);
-        ratings = blendWithMarketEstimate(ratings, salaryM, position, p.age || 25, p.externalId, sampleMpg);
+        // 有统计但样本很小（边缘轮换、5 场小样本爆发）：统计公式会被小样本
+        // 拉爆，按总出场分钟混入市场估值，避免 5 场合计 150 分钟评出 95。
+        const sampleTotalMp = perGame ? perGame.g * perGame.mpg : statLine.mp;
+        ratings = blendWithMarketEstimate(ratings, salaryM, position, p.age || 25, p.externalId, sampleTotalMp);
       }
       const teamFullId = p.teamAbbr ? teamIdByAbbr.get(p.teamAbbr.toUpperCase()) ?? null : null;
       // Real payload lacks career-length data — estimate years pro from age

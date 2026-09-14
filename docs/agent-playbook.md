@@ -38,7 +38,7 @@ npx tsx scripts/agent-eval.ts status <evalId>    # 随时看比分
 | `get_roster`/`get_assets`/`get_market` | `{}` / `{teamId}` | 侦察对手阵容用 `get_market {teamId}` |
 | `propose_trade` | `{partnerTeamId, givePlayerIds[], givePickIds[], receivePlayerIds[], receivePickIds[], pickProtections?}` | 对方 AI 会估值还价；二奢队只能 1:1 |
 | `respond_trade` | `{offerId, accept}` | inboundOffers 报价约 4 天过期 |
-| `extend_contract` | `{playerId, extraYears, avgSalary}` | 剩≤2年；首年≤末年×140%；价≥要价95% |
+| `extend_contract` | `{playerId, extraYears, avgSalary}` | 剩≤2年；首年≤max(末年, 联盟均薪)×140%；价≥要价95% |
 | `set_rotation` | `{starters[5], minutes{id:min}}` | 跨年保留；伤停不能首发 |
 | `sign_free_agent` | `{playerId, years, avgSalary}` | 赛季中只能底薪；母队 FA 有忠诚加成 |
 | `waive_player` | `{playerId, stretch?}` | stretch 摊 2n+1 季死钱 |
@@ -53,7 +53,7 @@ npx tsx scripts/agent-eval.ts status <evalId>    # 随时看比分
 1. **ID 必须抄观察里的**——猜 ID 会烧回合还计错误率。每次 `get_roster`/`get_market` 后从 `id` 字段取
 2. **选秀两段式**:他人签位时 `draft_pick` 只推进；观察 `draft.myNextPick` 是你的顺位,此时再发 `draft_pick {prospectId}` 才真正选人
 3. **截止日是 2/6**:想主动交易要在 1 月底前发 `propose_trade`;月度推进跨过 2/6 会暂停报 inbound 报价,回应后窗口即关
-4. **140% 续约陷阱**:便宜合同球员(Reaves 13.9M→要价 35.7)无法提前续约——不是 bug,是 CBA 真实规则;放他进 FA 用**鸟权帽上签回**（有忠诚加成,别恐慌放走）
+4. **140% 续约陷阱**:续约首年上限 = max(末年薪资, 联盟均薪)×140%。便宜合同球员(Reaves 13.9M→要价 35.7)即使走均薪支腿也够不到要价——放他进 FA 用**鸟权帽上签回**（有忠诚加成,别恐慌放走）
 5. **顶薪球星竞价战**:要价=顶薪时必须给满 max+5 年,母队有 +10 忠诚加成才能压过竞争者
 6. **二奢队只能 1:1**——打包到期合同换星的方案对超二奢队直接无效;侦察 `cap` 先看对方薪资结构
 7. **练新人吃分钟**:≤24 岁打 ≥40 场 × ≥20 分钟才加速成长——高上限新秀要真给轮换时间,但会掉战绩

@@ -130,9 +130,16 @@ describe("Trade validation", () => {
 
   it("salary matching bands behave per CBA v1.0", () => {
     const underCap = { totalSalary: 100, capSpace: 40, overCap: false, overTax: false, overFirstApron: false, overSecondApron: false, taxBill: 0, rosterCount: 14 };
-    // under cap: 150% + 0.1M
-    expect(salaryMatching(10, 15.1, underCap).ok).toBe(true);
-    expect(salaryMatching(10, 15.2, underCap).ok).toBe(false);
+    // under cap: cap room is a trade asset — incoming <= outgoing + space + 0.1
+    expect(salaryMatching(10, 50.1, underCap).ok).toBe(true);
+    expect(salaryMatching(10, 50.2, underCap).ok).toBe(false);
+    // zero-outgoing absorption: 40M of room swallows a big contract for picks
+    expect(salaryMatching(0, 40.1, underCap).ok).toBe(true);
+    expect(salaryMatching(0, 40.2, underCap).ok).toBe(false);
+    // thin space → the 150% + 0.1M band still applies as the fallback
+    const tightCap = { ...underCap, capSpace: 3 };
+    expect(salaryMatching(10, 15.1, tightCap).ok).toBe(true);
+    expect(salaryMatching(10, 15.2, tightCap).ok).toBe(false);
     // over cap, small outgoing: 150% + 0.1M
     const overCap = { ...underCap, overCap: true, capSpace: -5 };
     expect(salaryMatching(6, 9.1, overCap).ok).toBe(true);

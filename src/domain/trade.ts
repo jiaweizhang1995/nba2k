@@ -268,24 +268,32 @@ export function validateTrade(proposal: TradeProposal, teams: TradeTeam[], seaso
       issues.push({ code: "APRON_AGGREGATION", severity: "BLOCKER", message: `${team.abbr} 超第二土豪线：不得在交易中打包送出多名球员` });
     }
 
-    // Stepien rule: cannot trade own future 1st in consecutive years.
-    // Protected picks are exempt — protection exists precisely to allow trading them.
+    // Stepien rule — STATEFUL: sending out an own future 1st must not leave
+    // the team without ANY first-round pick (own or acquired) in consecutive
+    // years. A team that already dealt its 2028 first can't then send its
+    // 2029 — the check looks at post-trade holdings, not just this deal.
+    // Protected picks are exempt as the trigger — protection exists
+    // precisely to allow trading them.
     if (CBA.stepienRule) {
-      const ownFutureFirsts = givePicks
-        .filter(
-          (pk) =>
-            pk.round === 1 &&
-            pk.originalTeamId === party.teamId &&
-            pk.year > season &&
-            (!pk.protection || pk.protection.type === "NONE"),
-        )
-        .sort((a, b) => a.year - b.year);
-      for (let i = 1; i < ownFutureFirsts.length; i++) {
-        if (ownFutureFirsts[i].year === ownFutureFirsts[i - 1].year + 1) {
+      const recvPicks = party.receives.filter((a) => a.kind === "PICK").map((a) => pickById.get(a.id)).filter((p): p is RegPick => !!p);
+      const giveIds = new Set(givePicks.map((p) => p.id));
+      const holdsFirst = (year: number): boolean => {
+        if (year <= season) return true; // current year's pick is settled
+        if (year > season + CBA.pickTradeYears) return true; // beyond tradable horizon — can't have been dealt
+        return (
+          team.picks.some((pk) => pk.round === 1 && pk.year === year && pk.status === "OWNED" && !giveIds.has(pk.id)) ||
+          recvPicks.some((pk) => pk.round === 1 && pk.year === year)
+        );
+      };
+      for (const pk of givePicks) {
+        if (pk.round !== 1 || pk.originalTeamId !== party.teamId || pk.year <= season) continue;
+        if (pk.protection && pk.protection.type !== "NONE") continue;
+        if (holdsFirst(pk.year)) continue; // kept or acquired another first that year
+        if (!holdsFirst(pk.year - 1) || !holdsFirst(pk.year + 1)) {
           issues.push({
             code: "STEPIEN",
             severity: "BLOCKER",
-            message: `${team.abbr} 违反 Stepien 规则：不得连续两年交易自己的无保护首轮签（${ownFutureFirsts[i - 1].year}、${ownFutureFirsts[i].year}）`,
+            message: `${team.abbr} 违反 Stepien 规则：送出 ${pk.year} 年首轮后将连续两年没有首轮签`,
           });
         }
       }
@@ -443,8 +451,15 @@ const ROLE_EXPENDABILITY: Record<string, number> = { BENCH: 0, ROTATION: 1, SIXT
 function minSalaryOut(salaryRecv: number, snap: CapSnapshot): number {
   if (salaryRecv <= 0) return 0;
   if (snap.overSecondApron) return round2(salaryRecv - 0.1);
-  if (snap.overCap && salaryRecv > 9.8) return round2((salaryRecv - 0.1) / CBA.tradeBand2);
-  return round2((salaryRecv - 0.1) / CBA.tradeBand1);
+  const bandMin = snap.overCap && salaryRecv > 9.8 ? round2((salaryRecv - 0.1) / CBA.tradeBand2) : round2((salaryRecv - 0.1) / CBA.tradeBand1);
+  if (!snap.overCap) {
+    // Under-cap teams can also absorb into space: recv - out <= capSpace + 0.1.
+    // The binding minimum is whichever route asks for less outgoing salary —
+    // a cap-rich team can take a big contract for almost nothing back.
+    const spaceMin = round2(Math.max(0, salaryRecv - Math.max(0, snap.capSpace) - 0.1));
+    return Math.min(bandMin, spaceMin);
+  }
+  return bandMin;
 }
 
 export function generateTradeOffers(

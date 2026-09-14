@@ -144,8 +144,10 @@ export function round2(v: number): number {
 
 /**
  * Salary-matching check for one party of a trade (fictional league version):
- *  - Under the cap: may take back up to 150% + $0.1M of outgoing salary
- *    (practically unlimited by cap room).
+ *  - Under the cap: incoming - outgoing <= capSpace + $0.1M (absorb into
+ *    room) OR incoming <= 150% + $0.1M of outgoing — whichever is wider.
+ *    Cap room is a real trade asset: a rebuilding team can absorb a big
+ *    contract for picks without sending salary back.
  *  - Over the cap: incoming <= 150% + $0.1M if outgoing <= $9.8M;
  *    incoming <= 125% + $0.1M if outgoing > $9.8M.
  *  - Above second apron: incoming <= outgoing (no aggregation of multiple
@@ -155,8 +157,11 @@ export function salaryMatching(outgoing: number, incoming: number, teamSnapshot:
   const out = round2(outgoing);
   const inc = round2(incoming);
   if (!teamSnapshot.overCap) {
-    const limit = round2(out * CBA.tradeBand1 + 0.1);
-    return { ok: inc <= limit, band: `UNDER_CAP: 接收薪资须 ≤ ${limit.toFixed(2)}M（150%+0.1M）` };
+    const spaceLimit = round2(out + Math.max(0, teamSnapshot.capSpace) + 0.1);
+    const bandLimit = round2(out * CBA.tradeBand1 + 0.1);
+    const limit = Math.max(spaceLimit, bandLimit);
+    const rule = spaceLimit >= bandLimit ? `帽下空间 ${Math.max(0, teamSnapshot.capSpace).toFixed(2)}M + 送出 + 0.1M` : "150%+0.1M";
+    return { ok: inc <= limit, band: `UNDER_CAP: 接收薪资须 ≤ ${limit.toFixed(2)}M（${rule}）` };
   }
   if (teamSnapshot.overSecondApron) {
     return { ok: inc <= out + 0.1, band: "SECOND_APRON: 接收薪资须 ≤ 送出薪资（不得超额）" };

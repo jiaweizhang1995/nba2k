@@ -31,8 +31,9 @@ export interface OfferInput {
  */
 export function askingSalaryFor(contract: Contract, yearsPro: number, overall = 70, age = 27, season?: number): number {
   // Anchor on the salary he JUST earned (last year entry), not the first —
-  // escalating deals make the gap real over a 5-year eval.
-  const prev = contract.years[contract.years.length - 1]?.salary ?? 5;
+  // escalating deals make the gap real over a 5-year eval. Empty contract
+  // (expired deal already stripped) → no anchor at all: rating sets the ask.
+  const prev = contract.years[contract.years.length - 1]?.salary ?? 0;
   const maxFirst = maxContractValue(yearsPro, 1, season ?? contract.years[0]?.season ?? 2027).firstYear;
   // Market value is set by talent, not by what the last contract happened to
   // pay — an 85-overall player coming off a rookie deal does not ask 5.5M.
@@ -99,8 +100,12 @@ export function evaluateOffer(
   // 一定拒绝——除非市场冷清（没有竞争者时他才会打折）。这堵死了"球星
   // 稳定七五折签约"的漏洞：有市场的球员总能拿到接近要价。
   const coldMarket = competitorInterest < 25;
+  const isMinimumOffer = offer.avgSalary <= seasonMoney(season).minimumSalary + 0.05;
+  // 冷市场底薪豁免：没人要的球员最后会接受一年底薪留在联盟——底薪报价
+  // 不走折价拒绝线，但要球员实际接受仍然需要意愿分够。
+  const minimumFallback = coldMarket && isMinimumOffer && offer.years >= 1;
   const moneyFloor = coldMarket ? 0.75 : 0.88;
-  if (moneyRatio < moneyFloor) {
+  if (moneyRatio < moneyFloor && !minimumFallback) {
     reasons.push(
       `报价 ${offer.avgSalary.toFixed(1)}M/年 远低于要价 ${player.askingSalary.toFixed(1)}M/年（底线 ${(moneyFloor * 100).toFixed(0)}%），被直接拒绝`,
     );
@@ -135,9 +140,16 @@ export function evaluateOffer(
     reasons.push(`母队忠诚加成 +10`);
   }
 
+  if (minimumFallback) {
+    // 底薪兜底：愿意留队的球员在无人问津时接受一年底薪，而不是退役消失。
+    interest += 25;
+    reasons.push(`市场冷清，底薪合同仍可谈（+25 意愿）`);
+  }
+
   interest += rng.float(-5, 5);
   interest = Math.max(0, Math.min(100, interest));
-  const accept = interest >= 62 && offer.years >= Math.min(player.askingYears, CBA.maxContractYears) * 0.6;
+  const yearsOk = minimumFallback ? offer.years >= 1 : offer.years >= Math.min(player.askingYears, CBA.maxContractYears) * 0.6;
+  const accept = interest >= 62 && yearsOk;
   return { interest: Math.round(interest), accept, reasons };
 }
 

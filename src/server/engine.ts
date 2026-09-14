@@ -20,6 +20,9 @@ import {
   dataSources as dataSourcesT,
   awards as awardsT,
   godSnapshots as godSnapshotsT,
+  evaluations as evaluationsT,
+  evalTurns as evalTurnsT,
+  evalSeasons as evalSeasonsT,
   type SaveRow,
 } from "@/db/schema";
 import { generateDemoLeague, DEMO_PROVIDER, DEMO_LICENSE, demoSource } from "@/data/demo";
@@ -331,6 +334,14 @@ export function deleteSave(saveId: string) {
     tx.delete(dataSourcesT).where(eq(dataSourcesT.saveId, saveId)).run();
     tx.delete(awardsT).where(eq(awardsT.saveId, saveId)).run();
     tx.delete(godSnapshotsT).where(eq(godSnapshotsT.saveId, saveId)).run();
+    // Eval rows reference the save via evaluations.saveId — turn/season rows
+    // hang off the evaluation, so clear children first (no FKs to help us).
+    const evalRows = tx.select({ id: evaluationsT.id }).from(evaluationsT).where(eq(evaluationsT.saveId, saveId)).all();
+    for (const e of evalRows) {
+      tx.delete(evalTurnsT).where(eq(evalTurnsT.evaluationId, e.id)).run();
+      tx.delete(evalSeasonsT).where(eq(evalSeasonsT.evaluationId, e.id)).run();
+    }
+    tx.delete(evaluationsT).where(eq(evaluationsT.saveId, saveId)).run();
     tx.delete(saves).where(eq(saves.id, saveId)).run();
   });
 }
@@ -442,11 +453,14 @@ export function persistState(state: LeagueState, extra?: { phaseState?: Record<s
       tx.update(teamsT).set({ wins: t.wins, losses: t.losses }).where(eq(teamsT.id, full(t.id))).run();
     }
     const existing = new Map(db.select({ id: playersT.id }).from(playersT).where(eq(playersT.saveId, state.saveId)).all().map((r) => [r.id, true]));
+    const abbrByTeam = new Map(state.teams.map((t) => [t.id, t.abbr]));
     for (const p of state.players) {
       const rowId = full(p.id);
       if (!existing.has(rowId)) continue;
       const statLine = p.seasonStats[0];
-      const seasonStat = statLine ? [{ season: state.season, teamAbbr: "N/A", ...statLine }] : [];
+      // Career history keeps team attribution — "N/A" made every line anon.
+      const statTeam = (p.teamId && abbrByTeam.get(p.teamId)) || (p.lastTeamId && abbrByTeam.get(p.lastTeamId)) || "N/A";
+      const seasonStat = statLine ? [{ season: state.season, teamAbbr: statTeam, ...statLine }] : [];
       tx.update(playersT)
         .set({
           teamId: p.teamId ? full(p.teamId) : null,
@@ -863,6 +877,41 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
     }
   }
 
+  // 1.6) salary-floor settlement for the season that just ended. Contracts
+  // haven't rolled yet, so years[0] is still the ended season's salary — the
+  // real payroll a team actually ran. Below the 90% floor the league bills
+  // the shortfall as next-season dead money: tanking has a cost floor.
+  {
+    const moneyEnded = seasonMoney(state.season);
+    const psFloor = getPhaseState(state.saveId);
+    const deadCap = { ...((psFloor.deadCap as Record<string, { season: number; salary: number }[]> | undefined) ?? {}) };
+    const fined: { abbr: string; short: number }[] = [];
+    for (const t of state.teams) {
+      const payroll = round2(
+        state.players
+          .filter((p) => p.teamId === t.id && p.status !== "PROSPECT")
+          .reduce((a, p) => a + salaryForSeason(p.contract, 0), 0) +
+          (deadCap[t.id] ?? []).filter((e) => e.season === state.season).reduce((a, e) => a + e.salary, 0),
+      );
+      const short = round2(moneyEnded.minTeamSalary - payroll);
+      if (short > 0.05) {
+        deadCap[t.id] = [...(deadCap[t.id] ?? []), { season: newSeason, salary: short }];
+        fined.push({ abbr: t.abbr, short });
+      }
+    }
+    if (fined.length) {
+      const db = getDb();
+      db.update(saves)
+        .set({ phaseState: { ...getPhaseState(state.saveId), deadCap } as never, updatedAt: now() })
+        .where(eq(saves.id, state.saveId))
+        .run();
+      for (const f of fined) {
+        logEvent(state.saveId, "CBA", `工资下限结算：${f.abbr} 本赛季账面薪资低于下限 ${f.short.toFixed(1)}M，差额计入下赛季死钱`, { abbr: f.abbr, short: f.short });
+      }
+      result.notes.push(`工资下限结算：${fined.length} 队低于下限，差额罚款计入下赛季死钱`);
+    }
+  }
+
   // Elapsed contract years are dropped at rollover so years[0] is always the
   // UPCOMING season's salary — imported deals escalate year over year and
   // the cap must bill the current year, not the signing year's number.
@@ -949,10 +998,13 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
         resigned++;
         continue;
       }
-      // declined → free agent
+      // declined → UNRESTRICTED free agent (declining a rookie-scale option
+      // forfeits matching rights; the ROOKIE type would wrongly make him an
+      // RFA via isRestrictedFa).
       p.lastTeamId = p.teamId;
       p.teamId = null;
       p.status = "FREE_AGENT";
+      p.contract = { ...p.contract, type: "VETERAN" };
       enteredFa++;
       continue;
     }
@@ -975,7 +1027,9 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
         birdRights: true,
         noTrade: false,
         option: null,
-        signedSeason: state.season,
+        // Signed for the NEW season — the Dec-15 trade freeze must apply to
+        // AI re-signs exactly like user offseason signings.
+        signedSeason: newSeason,
       };
       resigned++;
     } else {
@@ -1000,10 +1054,23 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
     p.stamina = 1;
   }
 
-  // 4) lottery: worst 14 records (non-playoff approximation = worst records overall)
+  // 4) lottery: the pool is the non-playoff field (each conference's
+  // bottom 7 — the playoff bracket takes top 8 per conference), not simply
+  // the 14 worst records overall. Only picks 1–4 are drawn; 5–14 keep
+  // standings order, and playoff teams pick 15–30 by record.
   const order = [...state.teams].sort((a, b) => a.wins - b.wins || (a.abbr < b.abbr ? -1 : 1));
-  const worst14 = order.slice(0, 14).map((t) => t.id);
-  const lotteryResult = runLottery(state.seed, state.season, [...worst14, ...order.slice(14).map((t) => t.id)]);
+  const playoffIds = new Set(
+    (["EAST", "WEST"] as const).flatMap((conf) =>
+      state.teams
+        .filter((t) => t.conference === conf)
+        .sort((a, b) => b.wins - a.wins || (a.abbr < b.abbr ? -1 : 1))
+        .slice(0, 8)
+        .map((t) => t.id),
+    ),
+  );
+  const lotteryPool = order.filter((t) => !playoffIds.has(t.id)).map((t) => t.id);
+  const playoffOrder = order.filter((t) => playoffIds.has(t.id)).map((t) => t.id);
+  const lotteryResult = runLottery(state.seed, state.season, lotteryPool, playoffOrder);
   // Draft order: round 1 = lottery order; round 2 = reverse standings.
   // Slot ownership follows the pick rows, not standings — a traded pick's
   // holder picks in the original team's slot (otherwise traded picks never
@@ -1037,15 +1104,18 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
       .get();
     return row ? row.holder.split(":").slice(1).join(":") : origShort;
   };
-  const round1 = lotteryResult;
-  const round2 = order.map((t) => t.id);
-  const draftOrder = [...round1.map((id, i) => ({ pickNumber: i + 1, round: 1, holderTeamId: pickHolder(1, id) })), ...round2.map((id, i) => ({ pickNumber: i + 1, round: 2, holderTeamId: pickHolder(2, id) }))];
+  const round1Order = lotteryResult;
+  const secondRound = order.map((t) => t.id);
+  const draftOrder = [
+    ...round1Order.map((id, i) => ({ pickNumber: i + 1, round: 1, holderTeamId: pickHolder(1, id), originalTeamId: id })),
+    ...secondRound.map((id, i) => ({ pickNumber: i + 1, round: 2, holderTeamId: pickHolder(2, id), originalTeamId: id })),
+  ];
 
   state.phase = "DRAFT";
   state.season = newSeason;
   state.currentDate = `${newSeason - 1}-06-25`;
 
-  persistDraftOrder(state.saveId, draftOrder, lotteryResult, worst14);
+  persistDraftOrder(state.saveId, draftOrder, lotteryResult, lotteryPool);
   if (toPending.length) {
     const ps = getPhaseState(state.saveId);
     db2.update(saves)
@@ -1055,7 +1125,7 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
   }
   const generated = ensureDraftClass(state.saveId, state.seed, newSeason);
   if (generated > 0) result.notes.push(`已生成 ${generated} 人新秀池`);
-  logEvent(state.saveId, "DRAFT", `选秀大会准备就绪：乐透抽签完成（${state.season} 届）`, { lottery: round1.slice(0, 5), prospects: generated });
+  logEvent(state.saveId, "DRAFT", `选秀大会准备就绪：乐透抽签完成（${state.season} 届）`, { lottery: round1Order.slice(0, 5), prospects: generated });
 }
 
 /**
@@ -1122,11 +1192,11 @@ function ensureDraftClass(saveId: string, seed: number, season: number): number 
   return prospects.length;
 }
 
-function persistDraftOrder(saveId: string, order: { pickNumber: number; round: number; holderTeamId: string }[], lottery: string[], worst14: string[]) {
+function persistDraftOrder(saveId: string, order: { pickNumber: number; round: number; holderTeamId: string; originalTeamId: string }[], lottery: string[], lotteryPool: string[]) {
   const db = getDb();
   const existing = getPhaseState(saveId);
   db.update(saves)
-    .set({ phaseState: { ...existing, draft: { order, lottery, worst14 } } as never, updatedAt: now() })
+    .set({ phaseState: { ...existing, draft: { order, lottery, lotteryPool } } as never, updatedAt: now() })
     .where(eq(saves.id, saveId))
     .run();
 }
@@ -1303,10 +1373,11 @@ export function executeTrade(saveId: string, parties: TradeParty[], opts: { godM
   if (!save) throw new EngineError("NO_SAVE", "存档不存在");
   // Trade window: open during REGULAR_SEASON until the Feb-6 deadline, and
   // again through DRAFT/FREE_AGENCY/OFFSEASON. Closed during PLAYOFFS.
-  // AI market trades carry a note and run inside the window, so this only
-  // ever bites user/god trades outside it.
-  const isAiMarket = opts.note === "AI 交易截止日" || opts.note === "AI 休赛期交易";
-  if (!opts.godMode && !isAiMarket && !opts.allowPostDeadline) {
+  // `allowPostDeadline` is an INTERNAL flag — set only by engine-side callers
+  // (AI trade market, inbound-offer acceptance). It must never be reachable
+  // from request bodies; the `note` field is cosmetic and carries no
+  // permission.
+  if (!opts.godMode && !opts.allowPostDeadline) {
     if (save.phase === "PLAYOFFS") {
       return { executed: false as const, validation: { legal: false, issues: [{ code: "WINDOW", severity: "BLOCKER" as const, message: "季后赛期间交易窗口关闭" }], salaryCheck: [] } };
     }
@@ -1318,7 +1389,7 @@ export function executeTrade(saveId: string, parties: TradeParty[], opts: { godM
   // The deadline market fires on the first sim day on/after Feb 6 — validate
   // it as-of the deadline so the WINDOW rule doesn't kill legitimate market
   // trades (they already ran inside the real window).
-  const validationNow = isAiMarket || opts.allowPostDeadline
+  const validationNow = opts.allowPostDeadline
     ? { phase: save.phase, date: `${save.season}-02-06` }
     : { phase: save.phase, date: save.currentDate };
   const validation = validateTrade({ saveId, parties }, teams, save.season, validationNow);
@@ -1429,7 +1500,7 @@ export function getDraftBoard(saveId: string) {
 
 export function getDraftOrder(saveId: string) {
   const ps = getPhaseState(saveId);
-  const draft = ps.draft as { order?: { pickNumber: number; round: number; holderTeamId: string }[]; lottery?: string[]; worst14?: string[] } | undefined;
+  const draft = ps.draft as { order?: { pickNumber: number; round: number; holderTeamId: string; originalTeamId?: string }[]; lottery?: string[]; worst14?: string[]; lotteryPool?: string[] } | undefined;
   return draft?.order ?? [];
 }
 
@@ -1448,7 +1519,21 @@ export function makeDraftPick(saveId: string, opts: { prospectId?: string; simul
 
   const picked: { pickNumber: number; round: number; teamId: string; prospect: string | null }[] = [];
 
-  const performPick = (slot: { pickNumber: number; round: number; holderTeamId: string }, prospectId: string | null) => {
+  // Mark exactly the pick ROW this slot represents. When a holder owns two
+  // same-round picks (its own + a traded one), matching on holder alone marks
+  // whichever comes first — the original team disambiguates.
+  const markPickUsed = (tx: Parameters<Parameters<typeof db.transaction>[0]>[0], slot: { pickNumber: number; round: number; holderTeamId: string; originalTeamId?: string }) => {
+    const rows = tx
+      .select()
+      .from(picksT)
+      .where(and(eq(picksT.saveId, saveId), eq(picksT.year, save.season), eq(picksT.round, slot.round), eq(picksT.holderTeamId, `${saveId}:${slot.holderTeamId}`), eq(picksT.status, "OWNED")))
+      .all();
+    const target =
+      (slot.originalTeamId ? rows.find((r) => r.originalTeamId === `${saveId}:${slot.originalTeamId}`) : undefined) ?? rows[0];
+    if (target) tx.update(picksT).set({ status: "EXERCISED", resolved: `${slot.pickNumber}` }).where(eq(picksT.id, target.id)).run();
+  };
+
+  const performPick = (slot: { pickNumber: number; round: number; holderTeamId: string; originalTeamId?: string }, prospectId: string | null) => {
     const teamId = slot.holderTeamId;
     const prospects = db.select().from(playersT).where(and(eq(playersT.saveId, saveId), eq(playersT.status, "PROSPECT"), eq(playersT.draftYear, save.season))).all();
     let chosen = prospectId ? prospects.find((p) => p.id === `${saveId}:${prospectId}`) : null;
@@ -1473,11 +1558,7 @@ export function makeDraftPick(saveId: string, opts: { prospectId?: string; simul
       // No prospect available (real-data saves ship without a scout-rated
       // draft class): record the pick as skipped so the draft still completes
       // and the offseason can advance — never fabricate a player.
-      db.transaction((tx) => {
-        const pickRow = tx.select().from(picksT).where(and(eq(picksT.saveId, saveId), eq(picksT.year, save.season), eq(picksT.round, slot.round), eq(picksT.holderTeamId, `${saveId}:${teamId}`), eq(picksT.status, "OWNED"))).all();
-        const target = pickRow[0];
-        if (target) tx.update(picksT).set({ status: "EXERCISED", resolved: `${slot.pickNumber}` }).where(eq(picksT.id, target.id)).run();
-      });
+      db.transaction((tx) => markPickUsed(tx, slot));
       picked.push({ pickNumber: slot.pickNumber, round: slot.round, teamId, prospect: null });
       return;
     }
@@ -1500,9 +1581,7 @@ export function makeDraftPick(saveId: string, opts: { prospectId?: string; simul
         })
         .where(eq(playersT.id, chosen!.id))
         .run();
-      const pickRow = tx.select().from(picksT).where(and(eq(picksT.saveId, saveId), eq(picksT.year, save.season), eq(picksT.round, slot.round), eq(picksT.holderTeamId, `${saveId}:${teamId}`), eq(picksT.status, "OWNED"))).all();
-      const target = pickRow[0];
-      if (target) tx.update(picksT).set({ status: "EXERCISED", resolved: `${slot.pickNumber}` }).where(eq(picksT.id, target.id)).run();
+      markPickUsed(tx, slot);
     });
     picked.push({ pickNumber: slot.pickNumber, round: slot.round, teamId, prospect: chosen.name });
   };
@@ -1725,7 +1804,11 @@ export function runAiTradeMarket(saveId: string, diag?: Record<string, number>, 
       // usually $0 filler contracts. Anchor on the buyer's mid-salary movable
       // pieces first, then pad with cheap youngs.
       const movableBySalary = [...movable].sort((a, b) => salaryForSeason(b.contract, 0) - salaryForSeason(a.contract, 0));
-      for (const floor of [vetSalary / CBA.tradeBand2 - 0.2, vetSalary / CBA.tradeBand1 - 0.2]) {
+      const buyerSnap = capSnapshot(buyer.players.map((p) => ({ contract: p.contract })), buyer.players.length, buyer.deadMoney ?? 0, season);
+      // Cap-space buyers absorb salary with room instead of matching it — a
+      // rebuilding team renting out its space is a real deadline dynamic.
+      const spaceFloor = !buyerSnap.overCap ? Math.max(0, vetSalary - Math.max(0, buyerSnap.capSpace) - 0.2) : Infinity;
+      for (const floor of [spaceFloor, vetSalary / CBA.tradeBand2 - 0.2, vetSalary / CBA.tradeBand1 - 0.2]) {
         // Strategy A: salary anchor + cheap value pieces.
         const combo: TradePlayer[] = [];
         let sal = 0;
@@ -1773,7 +1856,7 @@ export function runAiTradeMarket(saveId: string, diag?: Record<string, number>, 
         const buyerOk = aiEvaluateTrade(parties[1], { saveId, parties }, teams, season).accept;
         if (!sellerOk) { bump("seller_reject"); continue; }
         if (!buyerOk) { bump("buyer_reject"); continue; }
-        const exec = executeTrade(saveId, parties, { note: deadline ? "AI 交易截止日" : "AI 休赛期交易" });
+        const exec = executeTrade(saveId, parties, { note: deadline ? "AI 交易截止日" : "AI 休赛期交易", allowPostDeadline: true });
         if (exec.executed) {
           used.add(sRow.id);
           used.add(bRow.id);
@@ -1836,7 +1919,12 @@ export function runAiTradeMarket(saveId: string, diag?: Record<string, number>, 
         const minOutgoingFor = (incoming: number) => {
           if (userSnap.overSecondApron) return incoming - 0.1;
           const smallBand = (incoming - 0.1) / CBA.tradeBand1;
-          if (smallBand <= 9.8 || !userSnap.overCap) return smallBand;
+          if (!userSnap.overCap) {
+            // Cap room route: incoming - outgoing <= capSpace + 0.1 — a
+            // cap-rich user can answer a salary dump with minimal outgoing.
+            return Math.min(smallBand, Math.max(0, incoming - Math.max(0, userSnap.capSpace) - 0.1));
+          }
+          if (smallBand <= 9.8) return smallBand;
           return (incoming - 0.1) / CBA.tradeBand2;
         };
         const maxIncomingFor = (outgoing: number) => {
@@ -1847,7 +1935,13 @@ export function runAiTradeMarket(saveId: string, diag?: Record<string, number>, 
         // The richest vet whose salary the user's movable contracts can
         // possibly match — cheaper vets get tried in descending value order.
         const movableTotal = movable.slice(0, askCap).reduce((s, p) => s + salaryForSeason(p.contract, 0), 0);
-        const maxAffordable = userSnap.overSecondApron ? movableTotal + 0.1 : movableTotal <= 9.8 || !userSnap.overCap ? movableTotal * CBA.tradeBand1 + 0.1 : movableTotal * CBA.tradeBand2 + 0.1;
+        const maxAffordable = userSnap.overSecondApron
+          ? movableTotal + 0.1
+          : !userSnap.overCap
+            ? Math.max(movableTotal * CBA.tradeBand1 + 0.1, movableTotal + Math.max(0, userSnap.capSpace) + 0.1)
+            : movableTotal <= 9.8
+              ? movableTotal * CBA.tradeBand1 + 0.1
+              : movableTotal * CBA.tradeBand2 + 0.1;
         const affordable = sellerVets.filter((v) => {
           const vSal = salaryForSeason(v.contract, 0);
           return vSal <= maxAffordable && minOutgoingFor(vSal) <= maxIncomingFor(vSal);
@@ -2302,7 +2396,9 @@ function runAiFreeAgencyDay(saveId: string, date: string): number {
     }
 
     // Suitors in a deterministic shuffle; first affordable team lands him.
-    const suitors = [...aiTeamIds].sort(() => rng.float(0, 1) - rng.float(0, 1));
+    // (Fisher-Yates via PRNG — a random-comparator sort isn't uniform and
+    // depends on the engine's sort implementation.)
+    const suitors = rng.shuffle(aiTeamIds);
     for (const teamId of suitors) {
       const res = aiTrySignFreeAgent(db, saveId, save.season, teamId, c, {
         mleUsed: mleUsed.has(teamId),
@@ -2878,7 +2974,9 @@ export function declineOption(saveId: string, playerId: string) {
   pending.delete(playerId);
   db.transaction((tx) => {
     tx.update(playersT)
-      .set({ teamId: null, lastTeamId: userTeamId, status: "FREE_AGENT", role: "BENCH", contract: { ...player.contract, years: [] } })
+      // Declined option → unrestricted FA (flip off ROOKIE so isRestrictedFa
+      // doesn't hand the incumbent matching rights it no longer holds).
+      .set({ teamId: null, lastTeamId: userTeamId, status: "FREE_AGENT", role: "BENCH", contract: { ...player.contract, years: [], type: "VETERAN" } })
       .where(eq(playersT.id, player.id))
       .run();
     tx.update(saves).set({ phaseState: { ...ps, [key]: [...pending] } as never, updatedAt: now() }).where(eq(saves.id, saveId)).run();
@@ -3013,10 +3111,16 @@ export function extendContract(saveId: string, playerId: string, extraYears: num
   if (avgSalary > playerMax + 0.001) {
     throw new EngineError("BAD_TERMS", `超过顶薪上限 ${playerMax.toFixed(1)}M/年`);
   }
-  // CBA: the first extension year can't exceed 140% of the final contract year.
+  // CBA: the first extension year can't exceed 140% of the final contract
+  // year OR 140% of the league-average salary, whichever is HIGHER — the
+  // second leg is what lets a star on a cheap expiring deal extend at
+  // something resembling market value instead of being capped by his
+  // below-market final year.
   const lastYearSalary = player.contract.years[yearsLeft - 1].salary;
-  if (avgSalary > lastYearSalary * 1.4 + 0.001) {
-    throw new EngineError("BAD_TERMS", `续约首年不得超过末年薪资的 140%（末年 ${lastYearSalary.toFixed(1)}M → 上限 ${(lastYearSalary * 1.4).toFixed(1)}M）`);
+  const leagueAvgSalary = money.salaryCap / 15;
+  const extensionCap = Math.max(lastYearSalary, leagueAvgSalary) * 1.4;
+  if (avgSalary > extensionCap + 0.001) {
+    throw new EngineError("BAD_TERMS", `续约首年上限 ${(extensionCap).toFixed(1)}M/年（max(末年 ${lastYearSalary.toFixed(1)}M, 联盟均薪 ${leagueAvgSalary.toFixed(1)}M) × 140%）`);
   }
   const extKey = `extended:${save.season}`;
   const extended = new Set((ps[extKey] as string[] | undefined) ?? []);

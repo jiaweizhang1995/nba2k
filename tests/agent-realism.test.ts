@@ -829,6 +829,29 @@ describe("inbound trade offers", () => {
     expect(res.executed).toBe(false);
     expect(res.validation?.issues.some((i) => i.code === "WINDOW")).toBe(true);
   }, 120_000);
+
+  it("a user-controlled note cannot bypass the trade window (regression: note is not a privilege)", async () => {
+    // The public trade route passes body.note straight into executeTrade —
+    // before the fix, note "AI 交易截止日" impersonated the internal AI
+    // market and skipped the WINDOW check entirely.
+    const s = await createSave({ name: "note bypass", seed: 555007 });
+    for (let i = 0; i < 8; i++) {
+      await advanceSim(s.saveId, "MONTH");
+      const sv = getSave(s.saveId)!;
+      if ((sv.phaseState as Record<string, unknown>)[`deadlineMarket:${sv.season}`]) break;
+    }
+    const sv = getSave(s.saveId)!;
+    expect(sv.phase).toBe("REGULAR_SEASON");
+    expect(sv.currentDate > `${sv.season}-02-06`).toBe(true);
+    for (const note of ["AI 交易截止日", "AI 休赛期交易"]) {
+      const res = executeTrade(s.saveId, [
+        { teamId: "SAC", gives: [{ kind: "PLAYER", id: "x" }], receives: [{ kind: "PLAYER", id: "y" }] },
+        { teamId: "LAL", gives: [{ kind: "PLAYER", id: "y" }], receives: [{ kind: "PLAYER", id: "x" }] },
+      ], { note });
+      expect(res.executed, `note=${note} must not bypass the window`).toBe(false);
+      expect(res.validation?.issues.some((i) => i.code === "WINDOW")).toBe(true);
+    }
+  }, 120_000);
 });
 
 describe("morale has teeth: monthly drift + disgruntled discount", () => {

@@ -8,7 +8,7 @@ import { rngFor, PRNG } from "../rng";
 import { assignStarters } from "../positions";
 import type { BoxPlayerLine, BoxScoreJson, Position } from "../types";
 
-export const GAME_SIM_VERSION = "GAME-SIM v2.0";
+export const GAME_SIM_VERSION = "GAME-SIM v2.1";
 
 export interface SimPlayer {
   id: string;
@@ -44,6 +44,11 @@ export interface SimTeam {
   name: string;
   players: SimPlayer[];
   config?: RotationConfig | null;
+  /** 0-100 roster chemistry (fit, continuity, mood) — nudges team efficiency. */
+  chemistry?: number;
+  /** -1..1 weekly form drift — correlated cross-game noise so wins aren't
+   * purely a function of static ratings (season win% spread depends on it). */
+  form?: number;
 }
 
 export interface BuildRotationOpts {
@@ -59,14 +64,20 @@ interface Slot {
   out: boolean; // fouled out
 }
 
+// Real-rotation shape: stars live at 36-38, starters 32-34, and the bench
+// tail is emergency-only — 8-9 man rotations like the actual league.
 const ROLE_BASE_MINUTES: Record<string, number> = {
-  STAR: 37,
-  STARTER: 33,
-  SIXTH_MAN: 27,
-  ROTATION: 13,
-  BENCH: 4,
+  STAR: 39,
+  STARTER: 34,
+  SIXTH_MAN: 24,
+  ROTATION: 9,
+  BENCH: 1.5,
   STASH: 0,
 };
+
+// Non-starters take minutes off a fixed ladder (6th man ~23, then falls off a
+// cliff) instead of per-role bases — real rotations are ranked, not labeled.
+const BENCH_LADDER = [23, 15, 11, 8, 5, 3, 2];
 
 const QUARTER_SECONDS = 12 * 60;
 const OT_SECONDS = 5 * 60;
@@ -120,21 +131,28 @@ export function buildRotation(team: SimTeam, rng: PRNG, opts: BuildRotationOpts 
     budget = 0;
   }
 
+  // Bench ordering for the ladder: role first (a real SIXTH_MAN tops it),
+  // then overall. Manager-assigned minutes are excluded — they own their slot.
+  const benchPool = avail
+    .filter((p) => !starterSet.has(p.id) && !(cfg?.minutes?.[p.id] != null && cfg.minutes[p.id] > 0))
+    .sort((a, b) => (ROLE_BASE_MINUTES[b.role] ?? 12) - (ROLE_BASE_MINUTES[a.role] ?? 12) || b.ratings.overall - a.ratings.overall);
+  const benchIdx = new Map<string, number>(benchPool.map((p, i) => [p.id, i]));
+
   const slots: Slot[] = avail.map((p) => {
     const isStarter = starterSet.has(p.id);
     const userMin = cfg?.minutes?.[p.id];
     if (userMin != null && userMin > 0) {
       return { player: p, plan: userMin, played: 0, fouls: 0, out: false };
     }
-    let base = ROLE_BASE_MINUTES[p.role] ?? 12;
-    if (isStarter) base = Math.max(base, 32.5);
+    const bi = benchIdx.get(p.id);
+    let base = isStarter ? Math.max(ROLE_BASE_MINUTES[p.role] ?? 12, 32.5) : bi != null && bi < BENCH_LADDER.length ? BENCH_LADDER[bi] : 1.5;
     // Playoff rotations tighten: more for the top, less for the deep bench.
-    if (playoff) base = isStarter ? base + 1.5 : p.role === "SIXTH_MAN" ? base + 1 : base * 0.75;
+    if (playoff) base = isStarter ? base + 1.5 : bi === 0 ? base + 1 : base * 0.75;
     // Fatigue = load management: starters lose minutes faster than bench
     // players, so a tired team spreads the load (and gets worse).
-    const staminaF = isStarter ? 0.8 + 0.2 * p.stamina : 0.9 + 0.1 * p.stamina;
+    const staminaF = isStarter ? 0.87 + 0.13 * p.stamina : 0.93 + 0.07 * p.stamina;
     // Back-to-backs push the same direction: stars get lighter nights.
-    const b2bF = b2b ? (isStarter ? 0.9 : 1.0) : 1;
+    const b2bF = b2b ? (isStarter ? 0.94 : 1.0) : 1;
     const plan = base * staminaF * b2bF;
     return { player: p, plan: Math.max(0, plan), played: 0, fouls: 0, out: false };
   });
@@ -290,16 +308,35 @@ export function simulateGame(
   const A = mkSide(away, awaySlots);
 
   // Team quality (minutes-weighted rotation averages) drive pace & efficiency.
+  // Offense includes `inside` so post scoring counts; overall is blended in so
+  // the production/impact captured by OVR (usage bump, real value beyond the
+  // six box-score subs) actually reaches the scoreboard.
   const teamSkill = (slots: Slot[], side: "off" | "def") => {
     let num = 0;
     let den = 0;
     for (const s of slots) {
       const r = s.player.ratings;
-      const v = side === "off" ? (r.finishing + r.threePoint + r.playmaking) / 3 : (r.perimeterD + r.interiorD + r.rebounding) / 3;
+      const v =
+        side === "off"
+          ? (r.inside + r.finishing + r.threePoint + r.playmaking) / 4
+          : (r.perimeterD + r.interiorD + r.rebounding) / 3;
       num += v * s.plan;
       den += s.plan;
     }
     return den > 0 ? num / den : 55;
+  };
+  const teamOvr = (slots: Slot[]) => {
+    let num = 0;
+    let den = 0;
+    for (const s of slots) { num += s.player.ratings.overall * s.plan; den += s.plan; }
+    return den > 0 ? num / den : 70;
+  };
+  // Star power: a team's three best players decide games more than the
+  // depth-average does (real rotations shorten when it matters). Mean OVR of
+  // the three highest-rated players in the rotation.
+  const star3 = (slots: Slot[]) => {
+    const top = [...slots].sort((a, b) => b.player.ratings.overall - a.player.ratings.overall).slice(0, 3);
+    return top.length ? top.reduce((a, s) => a + s.player.ratings.overall, 0) / top.length : 70;
   };
   // Locker-room morale: minutes-weighted satisfaction nudges team efficiency
   // (a miserable locker room plays a few points worse, a happy one sharper).
@@ -309,14 +346,33 @@ export function simulateGame(
     return den > 0 ? num / den : 60;
   };
   const moraleBoost = (slots: Slot[]) => 1 + (teamMorale(slots) - 60) * 0.0012; // ±~5% at extremes
-  const hOff = teamSkill(homeSlots, "off") * moraleBoost(homeSlots);
-  const hDef = teamSkill(homeSlots, "def") * moraleBoost(homeSlots);
-  const aOff = teamSkill(awaySlots, "off") * moraleBoost(awaySlots);
-  const aDef = teamSkill(awaySlots, "def") * moraleBoost(awaySlots);
+  // Roster chemistry is a structural multiplier on top of raw morale: a
+  // well-fitting, settled rotation executes a couple percent better than its
+  // talent says; a chucked-together one plays worse. ±~3% at the extremes.
+  const chemBoost = (team: SimTeam) => 1 + ((team.chemistry ?? 62) - 62) * 0.0008;
+  // Weekly form: hot weeks and cold weeks exist — ±2% efficiency, shared
+  // across a team's games that week so streaks correlate.
+  const formBoost = (team: SimTeam) => 1 + (team.form ?? 0) * 0.02;
+  const hOff = teamSkill(homeSlots, "off") * moraleBoost(homeSlots) * chemBoost(home) * formBoost(home);
+  const hDef = teamSkill(homeSlots, "def") * moraleBoost(homeSlots) * chemBoost(home) * formBoost(home);
+  const aOff = teamSkill(awaySlots, "off") * moraleBoost(awaySlots) * chemBoost(away) * formBoost(away);
+  const aDef = teamSkill(awaySlots, "def") * moraleBoost(awaySlots) * chemBoost(away) * formBoost(away);
+  // Matchup edge: a team's collective quality must move *possession outcomes*,
+  // not just pace — otherwise roster strength never converts into wins and
+  // standings become noise (observed corr(top3 OVR, win%) ≈ 0.4). Applied per
+  // shot/turnover below so a real edge is worth ~±7 net points across the
+  // league spread (best ~+8, worst ~-8 like the actual NBA).
+  const hOvr = teamOvr(homeSlots);
+  const aOvr = teamOvr(awaySlots);
+  // Saturate: even a huge talent gap shouldn't make a game a foregone
+  // conclusion — real upsets stay ~20% no matter the mismatch.
+  const EDGE_CAP = 8;
+  const hEdge = clamp(hOff - aDef + (hOvr - aOvr) * 1.4 + (star3(homeSlots) - star3(awaySlots)) * 0.8, -EDGE_CAP, EDGE_CAP);
+  const aEdge = clamp(aOff - hDef + (aOvr - hOvr) * 1.4 + (star3(awaySlots) - star3(homeSlots)) * 0.8, -EDGE_CAP, EDGE_CAP);
 
   // Pace: possessions per team per 48 min (NBA-like ≈ 100). Both teams' styles
   // meet in the middle; back-to-backs slow down; better offenses push a bit.
-  const pace48 = clamp(103.5 + (hOff + aOff - hDef - aDef) * 0.06 + rng.float(-2.5, 2.5) - (opts.backToBackHome ? 1.2 : 0) - (opts.backToBackAway ? 1.2 : 0), 90, 110);
+  const pace48 = clamp(102.5 + (hOff + aOff - hDef - aDef) * 0.06 + rng.float(-2.5, 2.5) - (opts.backToBackHome ? 1.2 : 0) - (opts.backToBackAway ? 1.2 : 0), 90, 110);
   const possessionSeconds = (periodSeconds: number, periodPossessions: number) => periodSeconds / Math.max(1, periodPossessions);
 
   const hca = opts.neutral ? 0 : opts.playoff ? 1.25 : 1; // multiplier on small probability shifts
@@ -335,7 +391,9 @@ export function simulateGame(
     const pool = side.onCourt.filter((s) => !s.out);
     const weighted = pool.map((s) => {
       const p = s.player;
-      let w = Math.max(0.5, (p.ratings.overall - 68) * 0.12 + 1.1) + p.usageTendency * 7;
+      // Star-driven usage: overall + real scoring share concentrate attempts.
+      // An 89-OVR high-usage player should dwarf an end-of-bench body ~3-4x.
+      let w = Math.max(0.5, (p.ratings.overall - 66) * 0.22) + p.usageTendency * 12;
       if (clutch && (p.role === "STAR" || p.ratings.overall >= 85)) w *= 1.7; // stars demand the ball late
       if (!clutch && Math.abs(margin) > 22) w *= 0.8; // stars rest mentally in blowouts
       w *= tire(s) * (0.9 + 0.1 * p.stamina);
@@ -351,9 +409,29 @@ export function simulateGame(
     return pool[rng.weightedIndex(pool.map((s) => Math.max(1, s.player.ratings[key] - 30)))] ?? side.slots[0];
   };
 
+  // Fouls run the other way: the WEAKER defenders are the ones who reach.
+  // ~3x spread across the league's defensive range, capped so stars on poor
+  // defenders still pick up a few.
+  const foulWeighted = (side: SideState, key: "perimeterD" | "interiorD"): Slot => {
+    if (side.onCourt.length === 0 || side.onCourt.every((s) => s.out)) sub(side, false);
+    const pool = side.onCourt.filter((s) => !s.out);
+    return pool[rng.weightedIndex(pool.map((s) => Math.max(0.2, 1 + (65 - s.player.ratings[key]) * 0.02)))] ?? side.slots[0];
+  };
+  // Team-level foul propensity: bad defensive units foul more often (~±15%).
+  const foulPropensity = (def: SideState) => {
+    const pool = def.onCourt.filter((s) => !s.out);
+    if (!pool.length) return 1;
+    const avgDef = pool.reduce((a, s) => a + (s.player.ratings.perimeterD + s.player.ratings.interiorD) / 2, 0) / pool.length;
+    return clamp(1 + (62 - avgDef) * 0.006, 0.85, 1.2);
+  };
+
+  // Court position matters as much as rebounding skill — bigs live near the
+  // rim. Linear weight: rating already encodes position-relative dominance,
+  // squaring it double-counts (a 90-rated C would grab half of all boards).
+  const REB_POS_BIAS: Record<Position, number> = { PG: 0.6, SG: 0.8, SF: 0.95, PF: 1.3, C: 1.5 };
   const reboundWeighted = (side: SideState): Slot => {
     const pool = side.onCourt.filter((s) => !s.out);
-    return pool[rng.weightedIndex(pool.map((s) => Math.max(1, s.player.ratings.rebounding - 25)))] ?? side.slots[0];
+    return pool[rng.weightedIndex(pool.map((s) => Math.max(1, (s.player.ratings.rebounding - 22) * (REB_POS_BIAS[s.player.position] ?? 1))))] ?? side.slots[0];
   };
 
   /** One offensive possession for `off` against `def`. Returns oreb extends? */
@@ -365,9 +443,10 @@ export function simulateGame(
     const hcaOff = ctx.homeIsOff ? hca : 0;
 
     // Turnover: playmaking vs defensive pressure; tired & raw handlers leak more.
+    const edge = ctx.homeIsOff ? hEdge : aEdge;
     const defPressure = def.onCourt.filter((s) => !s.out).reduce((a, s) => a + s.player.ratings.perimeterD, 0) / Math.max(1, def.onCourt.filter((s) => !s.out).length);
     let tovP = clamp(
-      0.128 + (62 - r.playmaking) * 0.0018 + (defPressure - 60) * 0.0007 - (r.playmaking > 82 ? 0.012 : 0) + (1 - tire(shooterSlot)) * 0.05 + (1 - shooter.stamina) * 0.08 - (ctx.clutch ? 0.008 : 0),
+      0.128 + (62 - r.playmaking) * 0.0018 + (defPressure - 60) * 0.0007 - edge * 0.0014 - (r.playmaking > 82 ? 0.012 : 0) + (1 - tire(shooterSlot)) * 0.05 + (1 - shooter.stamina) * 0.08 - (ctx.clutch ? 0.008 : 0),
       0.05,
       0.26,
     );
@@ -375,7 +454,7 @@ export function simulateGame(
     else tovP += 0.006 * hca;
     if (rng.chance(tovP)) {
       line.tov++;
-      if (rng.chance(0.55)) lineOf(def, defendWeighted(def, "perimeterD").player).stl++;
+      if (rng.chance(0.62)) lineOf(def, defendWeighted(def, "perimeterD").player).stl++;
       return false;
     }
 
@@ -385,14 +464,14 @@ export function simulateGame(
     const isThree = rng.chance(threeP);
 
     // Shooting foul (in the act): slightly higher at home — a *probability* shift, never free points.
-    const foulP = (isThree ? 0.055 : 0.11) + 0.008 * hcaOff;
+    const foulP = ((isThree ? 0.055 : 0.11) + 0.008 * hcaOff) * foulPropensity(def);
     if (rng.chance(foulP)) {
-      const fouler = defendWeighted(def, isThree ? "perimeterD" : "interiorD").player;
+      const fouler = foulWeighted(def, isThree ? "perimeterD" : "interiorD").player;
       lineOf(def, fouler);
       foulerSlotFoul(def, fouler, ctx);
       line.fta += isThree ? 3 : 2;
       for (let i = 0; i < (isThree ? 3 : 2); i++) {
-        if (rng.chance(clamp(r.freeThrow / 100 + 0.08 + (ctx.homeIsOff ? 0.01 : 0), 0.45, 0.97))) {
+        if (rng.chance(clamp(r.freeThrow / 100 + (ctx.homeIsOff ? 0.01 : 0), 0.45, 0.97))) {
           line.ftm++;
           line.pts++;
           off.score++;
@@ -407,12 +486,17 @@ export function simulateGame(
     const defQ =
       def.onCourt.filter((s) => !s.out).reduce((a, s) => a + (isThree ? s.player.ratings.perimeterD : (s.player.ratings.interiorD + s.player.ratings.perimeterD) / 2), 0) /
       Math.max(1, def.onCourt.filter((s) => !s.out).length);
+    // Skill-sourced swing on a single shot saturates: even a superstar vs a
+    // blown coverage only buys ~+5pp. Capping the combined individual+team
+    // term keeps blowout margins realistic without blurring mid-table order.
     let makeP: number;
     if (isThree) {
-      makeP = clamp(0.314 + (r.threePoint - defQ) * 0.0042 + 0.006 * hcaOff - (1 - tire(shooterSlot)) * 0.03 - (1 - shooter.stamina) * 0.09, 0.2, 0.55);
+      const skillSwing = clamp((r.threePoint - defQ) * 0.0055 + edge * 0.0028, -0.05, 0.055);
+      makeP = clamp(0.315 + skillSwing + 0.006 * hcaOff - (1 - tire(shooterSlot)) * 0.03 - (1 - shooter.stamina) * 0.09, 0.2, 0.55);
     } else {
       const finish = (r.finishing + r.inside) / 2;
-      makeP = clamp(0.507 + (finish - defQ) * 0.0038 + 0.007 * hcaOff - (1 - tire(shooterSlot)) * 0.03 - (1 - shooter.stamina) * 0.09, 0.36, 0.70);
+      const skillSwing = clamp((finish - defQ) * 0.005 + edge * 0.0032, -0.05, 0.055);
+      makeP = clamp(0.505 + skillSwing + 0.007 * hcaOff - (1 - tire(shooterSlot)) * 0.03 - (1 - shooter.stamina) * 0.09, 0.36, 0.70);
     }
     makeP += rng.gauss(0, 0.012);
 
@@ -421,18 +505,20 @@ export function simulateGame(
       line.pts += isThree ? 3 : 2;
       if (isThree) line.tpm++;
       off.score += isThree ? 3 : 2;
-      // Assist: ball-movement chance shaped by team playmaking, capped for iso-heavy stars.
+      // Assist: ball-movement chance shaped by team playmaking, credited mostly
+      // to the real creators — squared weight so the Jokic/Luka types rack up
+      // assists instead of spreading them evenly across the floor.
       const helpers = off.onCourt.filter((s) => !s.out && s.player.id !== shooter.id);
-      const helper = helpers[rng.weightedIndex(helpers.map((s) => Math.max(1, s.player.ratings.playmaking - 35)))] ?? helpers[0];
+      const helper = helpers[rng.weightedIndex(helpers.map((s) => Math.max(1, Math.pow(s.player.ratings.playmaking - 28, 2))))] ?? helpers[0];
       if (helper) {
-        const astP = clamp(0.42 + helper.player.ratings.playmaking * 0.0028 - shooter.usageTendency * 0.18, 0.18, 0.72);
+        const astP = clamp(0.36 + helper.player.ratings.playmaking * 0.0042 - shooter.usageTendency * 0.15, 0.22, 0.8);
         if (rng.chance(astP)) lineOf(off, helper.player).ast++;
       }
       return false;
     }
 
     // Miss: block? then rebound battle (offensive board extends the possession).
-    if (!isThree && rng.chance(0.055)) {
+    if (!isThree && rng.chance(0.18)) {
       lineOf(def, defendWeighted(def, "interiorD").player).blk++;
     }
     const offRebW = off.onCourt.filter((s) => !s.out).reduce((a, s) => a + s.player.ratings.rebounding * s.player.ratings.rebounding, 0);
@@ -460,10 +546,11 @@ export function simulateGame(
   };
 
   const nonShootingFoulCheck = (off: SideState, def: SideState, ctx: { clutch: boolean; garbage: boolean; period: "REG" | "OT"; homeIsOff: boolean }) => {
-    if (!rng.chance(0.055)) return;
-    const foulerSlot = defendWeighted(def, "interiorD");
+    if (!rng.chance(0.055 * foulPropensity(def))) return;
+    const foulerSlot = foulWeighted(def, "interiorD");
     foulerSlotFoul(def, foulerSlot.player, ctx);
-    if (def.teamFouls > 5) {
+    // Bonus FTs start on the 5th team foul of the quarter (NBA rule).
+    if (def.teamFouls >= 5) {
       // Bonus: two shots for the best free-throw shooter on the floor.
       const eligible = off.onCourt.filter((s) => !s.out);
       const shooter = eligible[rng.weightedIndex(eligible.map((s) => Math.max(1, s.player.ratings.freeThrow - 35)))];
@@ -471,7 +558,7 @@ export function simulateGame(
       const line = lineOf(off, shooter.player);
       line.fta += 2;
       for (let i = 0; i < 2; i++) {
-        if (rng.chance(clamp(shooter.player.ratings.freeThrow / 100 + 0.08, 0.45, 0.97))) {
+        if (rng.chance(clamp(shooter.player.ratings.freeThrow / 100, 0.45, 0.97))) {
           line.ftm++;
           line.pts++;
           off.score++;

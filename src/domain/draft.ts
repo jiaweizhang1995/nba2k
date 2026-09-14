@@ -99,16 +99,21 @@ export function lotteryOdds(worstToBest: string[]): { teamId: string; oddsPct: n
   return worstToBest.slice(0, 14).map((teamId, i) => ({ teamId, oddsPct: Math.round((combos[i] / total) * 1000) / 10 }));
 }
 
-/** Run the lottery: returns ordered teamIds for picks 1..14. */
-export function runLottery(seed: number, season: number, worstToBest: string[]): string[] {
+/**
+ * Run the lottery. `lotteryPool` is the non-playoff teams ordered worst→best
+ * by record (up to 14); `playoffTeams` is the playoff field ordered
+ * worst→best (they pick 15+). Only picks 1–4 are drawn — weighted sampling
+ * without replacement — and the rest of the pool keeps its standings order
+ * (picks 5–14), matching the real lottery's structure.
+ * Returns the full round-1 order (lottery order + playoff teams by record).
+ */
+export function runLottery(seed: number, season: number, lotteryPool: string[], playoffTeams: string[] = []): string[] {
   const rng = rngFor(seed, `lottery:${season}`);
-  const odds = lotteryOdds(worstToBest);
-  const pool: { teamId: string; weight: number }[] = odds.map((o) => ({ teamId: o.teamId, weight: 1 }));
-  // Weighted sampling without replacement, 4 flattened "jackpot" draws.
-  const result: string[] = [];
-  const remaining = [...odds.map((o) => o.teamId)];
-  const weights = [...odds.map((o) => Math.max(1, o.oddsPct))];
-  for (let i = 0; i < Math.min(14, remaining.length); i++) {
+  const odds = lotteryOdds(lotteryPool);
+  const remaining = odds.map((o) => o.teamId);
+  const weights = odds.map((o) => Math.max(1, o.oddsPct));
+  const drawn: string[] = [];
+  for (let i = 0; i < Math.min(4, remaining.length); i++) {
     const total = weights.reduce((a, b) => a + b, 0);
     let r = rng.next() * total;
     let idx = 0;
@@ -117,16 +122,16 @@ export function runLottery(seed: number, season: number, worstToBest: string[]):
       if (r <= 0) break;
     }
     idx = Math.min(idx, remaining.length - 1);
-    result.push(remaining[idx]);
+    drawn.push(remaining[idx]);
     remaining.splice(idx, 1);
     weights.splice(idx, 1);
   }
-  // Any remaining non-lottery teams appended in worst-to-best order.
-  for (const t of worstToBest) if (!result.includes(t)) result.push(t);
-  // Teams outside top-14 (playoff teams) appended by reverse record.
-  for (const t of worstToBest.slice(14)) if (!result.includes(t)) result.push(t);
-  void pool;
-  return result;
+  // Picks 5–14: undrawn lottery teams keep their standings order.
+  const round1 = [...drawn, ...remaining];
+  // Any pool team past slot 14 (over-supplied pool) then playoff teams by record.
+  for (const t of lotteryPool.slice(round1.length)) if (!round1.includes(t)) round1.push(t);
+  for (const t of playoffTeams) if (!round1.includes(t)) round1.push(t);
+  return round1;
 }
 
 /** AI drafts the best fit available for a team (needs: position depth + best player). */
@@ -152,7 +157,9 @@ export function aiDraftPick(
 export function prospectRookieContract(pickNumber: number, round: number, season: number) {
   const first = rookieScaleSalary(pickNumber, round, season);
   const r2 = round2(CBA.rookieScale.round2Min * (seasonMoney(season).salaryCap / CBA.salaryCap));
-  const years = round === 1 ? [season, season + 1, season + 2, season + 3].map((s, i) => ({ season: s, salary: round2(first * (1 - i * 0.05)) })) : [season, season + 1].map((s) => ({ season: s, salary: r2 }));
+  // Rookie scale ASCENDS year over year — the old code decayed 5%/yr, which
+  // made rookie deals cheaper at the end instead of pricier.
+  const years = round === 1 ? [season, season + 1, season + 2, season + 3].map((s, i) => ({ season: s, salary: round2(first * (1 + i * 0.05)) })) : [season, season + 1].map((s) => ({ season: s, salary: r2 }));
   const option = round === 1 ? ("TO" as const) : null;
   return { type: "ROOKIE" as const, years, birdRights: false, noTrade: false, option, signedSeason: season };
 }

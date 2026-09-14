@@ -131,6 +131,7 @@ function parseTemplateParams(raw: string): Record<string, string> {
 
 interface ParsedPlayer {
   name: string;
+  rawName: string; // pre-normalization name — externalId slug source
   position: string;
   num: number | null;
   heightCm: number | null;
@@ -173,7 +174,11 @@ function parsePlayersFromTemplate(wikitext: string): ParsedPlayer[] {
     const params = parseTemplateParams(match[1]);
     const first = params["first"] ?? "";
     const last = params["last"] ?? "";
-    const name = params["name"] ?? `${first} ${last}`.trim();
+    const rawName = params["name"] ?? `${first} ${last}`.trim();
+    // Wikipedia writes initials spaced ("V. J. Edgecombe"); the league style
+    // is compact ("VJ Edgecombe"). Display uses the compact form; externalId
+    // below still slugs the raw name so ids stay stable across re-fetches.
+    const name = rawName.replace(/^([A-Z])\. ?([A-Z])\. /, "$1$2 ");
     if (!name) continue;
     const ft = Number(params["ft"] ?? 0) || 0;
     const inch = Number(params["in"] ?? 0) || 0;
@@ -184,6 +189,7 @@ function parsePlayersFromTemplate(wikitext: string): ParsedPlayer[] {
     const wikiTitle = `${first} ${last}`.trim() + (dab ? ` (${dab})` : "");
     players.push({
       name,
+      rawName,
       position: mapPosition(params["pos"] ?? ""),
       num: Number(params["num"]) || null,
       heightCm: ft > 0 ? Math.round((ft * 12 + inch) * 2.54) : null,
@@ -272,7 +278,7 @@ async function main() {
     });
     for (const p of roster) {
       players.push({
-        externalId: `nba-${p.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}${p.num ? `-${p.num}` : ""}`,
+        externalId: `nba-${p.rawName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}${p.num ? `-${p.num}` : ""}`,
         name: p.name,
         position: p.position,
         teamAbbr: facts.abbr,

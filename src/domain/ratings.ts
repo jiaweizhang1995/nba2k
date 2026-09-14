@@ -189,8 +189,10 @@ export function estimateRatingsFromSalary(
   if (age >= 35) overall -= 2;
   overall = clamp(Math.round(overall));
   const arch = ARCHETYPE_OFFSETS[position] ?? ARCHETYPE_OFFSETS.SF;
-  const jitter = () => rng.int(-2, 2);
-  const sub = (off: number) => clamp(Math.round(overall + off + jitter()));
+  const jitter = () => rng.int(-5, 5);
+  // Estimated subs trail the overall by ~3 and spread wider — a contract alone
+  // can't tell a marksman from a bruiser, so don't paint every attribute elite.
+  const sub = (off: number) => clamp(Math.round(overall + off * 2 + jitter() - 3));
   const usageTendency = overall >= 82 ? 0.27 : overall >= 72 ? 0.21 : overall >= 62 ? 0.15 : 0.11;
   return {
     overall,
@@ -226,13 +228,14 @@ export function blendWithMarketEstimate(
   position: Position,
   age: number,
   playerId: string,
-  sampleMpg = 99,
+  sampleTotalMp = 9999,
 ): PlayerRatings {
   if (!salaryM || salaryM <= 0) return r;
   const market = estimateRatingsFromSalary(salaryM, position, age, playerId);
-  // Trust stats by on-court load: 20+ mpg = a real rotation slot, 5-8 mpg =
-  // garbage-time samples the stat formula over-punishes.
-  const trust = Math.max(0, Math.min(1, sampleMpg / 20));
+  // Trust stats by total minutes played: ~800 mp (25+ games of rotation run)
+  // is a real sample; a 5-game hot streak is not — the market price fills in
+  // the rest. Per-game mpg alone can't tell those apart.
+  const trust = Math.max(0, Math.min(1, sampleTotalMp / 800));
   const blended = Math.round(r.overall * trust + market.overall * (1 - trust));
   const shift = blended - r.overall;
   if (shift === 0) return r;
@@ -295,7 +298,7 @@ export interface PerGameSeasonLine {
   ppg: number;
 }
 
-export const RATING_VERSION_V13 = "RATING-ENGINE v1.3";
+export const RATING_VERSION_V13 = "RATING-ENGINE v1.4";
 
 /**
  * Position-relative benchmarks (per-game, 2025-26 NBA levels). A center's 10
@@ -327,14 +330,19 @@ export function computeRatingsFromPerGameRaw(
   const ft = line.ftPct ?? 0.75;
   const base = POS_BASE[position] ?? POS_BASE.SF;
 
-  const inside = clamp(50 + (fg - base.fg) * 170);
-  const finishing = clamp(55 + (fg - base.fg) * 210 + (line.ppg / Math.max(1, line.mpg) - 0.55) * 18);
-  const shooting = clamp(55 + (tp - 0.355) * 230);
-  const freeThrow = clamp(30 + (ft - 0.6) * 180);
-  const playmaking = clamp(55 + (line.apg - base.apg) * 5.2);
-  const rebounding = clamp(55 + (line.rpg - base.reb) * base.rebSlope);
-  const perimeterD = clamp(55 + (line.spg - base.stl) * base.stlSlope);
-  const interiorD = clamp(55 + (line.bpg - base.blk) * base.blkSlope);
+  // v1.4 spread: league-average production lands ~58-62, elite 85-95. The
+  // previous 55-anchored shallow slopes compressed everyone into 45-65, which
+  // flattened the sim's difference-based probabilities (stars and bench shot
+  // nearly identically). Steeper slopes restore real separation.
+  const inside = clamp(55 + (fg - base.fg) * 280 + (line.ppg - 12) * 0.9);
+  const finishing = clamp(58 + (fg - base.fg) * 260 + (line.ppg / Math.max(1, line.mpg) - 0.5) * 30);
+  const shooting = clamp(62 + (tp - 0.35) * 380);
+  // FT rating maps 1:1 to observed FT% — the sim uses it as the make prob.
+  const freeThrow = clamp(Math.round(ft * 100));
+  const playmaking = clamp(58 + (line.apg - base.apg) * 7);
+  const rebounding = clamp(58 + (line.rpg - base.reb) * base.rebSlope * 1.7);
+  const perimeterD = clamp(57 + (line.spg - base.stl) * base.stlSlope * 1.6);
+  const interiorD = clamp(57 + (line.bpg - base.blk) * base.blkSlope * 1.6);
 
   const w = POSITION_WEIGHTS[position] ?? POSITION_WEIGHTS.SF;
   const blend =
@@ -350,7 +358,8 @@ export function computeRatingsFromPerGameRaw(
   // 22-ppg option on a good team lands closer to a 26-ppg option than the raw
   // volume gap suggests (matches how the real game rates roles).
   const load = line.ppg - 9;
-  const bump = (load > 12 ? 12 + (load - 12) * 0.65 : load) * 1.25 + (line.mpg - 24) * 0.5;
+  // -4 offsets the v1.4 sub-rating spread lift so the overall band stays put.
+  const bump = (load > 12 ? 12 + (load - 12) * 0.65 : load) * 1.25 + (line.mpg - 24) * 0.5 - 4;
   // 年龄微调：同样新秀赛季的产出，19 岁比 24 岁更被看好；34 岁老将的
   // 产出折扣一点（现实中 2K 评分也对年龄敏感）。
   const ageAdj = age <= 21 ? 1.5 : age <= 23 ? 0.5 : age >= 34 ? -1.5 : age >= 31 ? -0.5 : 0;

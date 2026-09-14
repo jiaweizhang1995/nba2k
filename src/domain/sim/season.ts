@@ -3,6 +3,7 @@
 
 import { rngFor } from "../rng";
 import { simulateGame, type SimPlayer, type RotationConfig } from "./game";
+import { computeChemistry } from "../chemistry";
 import type { SeasonPhase, GameType, Contract } from "../types";
 
 export const SEASON_SIM_VERSION = "SEASON-SIM v2.0";
@@ -332,9 +333,27 @@ function simAndApply(state: LeagueState, g: LeagueGame, report: DayReport) {
   const awayPlayers = state.players.filter((p) => p.teamId === away.id && (p.status === "ACTIVE" || p.status === "INJURED"));
   const backToBackHome = state.games.some((x) => x.status === "FINAL" && x.date === isoAddDays(state.currentDate, -1) && (x.homeTeamId === home.id || x.awayTeamId === home.id));
   const backToBackAway = state.games.some((x) => x.status === "FINAL" && x.date === isoAddDays(state.currentDate, -1) && (x.homeTeamId === away.id || x.awayTeamId === away.id));
+  // Roster chemistry feeds the sim: fit/continuity/mood move team efficiency,
+  // so a churned roster underperforms its ratings for a while.
+  const chemCtx = { season: state.season, gamesPlayed: home.wins + home.losses, lastSeasonWins: null };
+  const toChem = (p: LeaguePlayer) => ({
+    id: p.id,
+    position: p.position as never,
+    ratings: p.ratings as never,
+    role: p.role as never,
+    age: p.age,
+    tenure: p.tenure,
+    satisfaction: p.satisfaction,
+    contractEnd: p.contract.years.length ? p.contract.years[p.contract.years.length - 1].season : state.season,
+  });
+  // Weekly form drift (deterministic, shared across a team's games that
+  // week): real teams run hot and cold — without it, season win% spread
+  // comes out too narrow vs. reality.
+  const weekNo = Math.floor(Date.parse(g.date) / (7 * 86400000));
+  const formOf = (teamId: string) => rngFor(state.seed, `form:${state.season}:${weekNo}:${teamId}`).float(-1, 1);
   const result = simulateGame(
-    { id: home.id, name: home.name, players: homePlayers.map(toSimPlayer), config: state.rotation?.[home.id] ?? null },
-    { id: away.id, name: away.name, players: awayPlayers.map(toSimPlayer), config: state.rotation?.[away.id] ?? null },
+    { id: home.id, name: home.name, players: homePlayers.map(toSimPlayer), config: state.rotation?.[home.id] ?? null, chemistry: computeChemistry(homePlayers.map(toChem), chemCtx).overall, form: formOf(home.id) },
+    { id: away.id, name: away.name, players: awayPlayers.map(toSimPlayer), config: state.rotation?.[away.id] ?? null, chemistry: computeChemistry(awayPlayers.map(toChem), chemCtx).overall, form: formOf(away.id) },
     {
       seed: state.seed,
       salt: `game:${g.id}:${g.date}`,
@@ -408,8 +427,14 @@ function simAndApply(state: LeagueState, g: LeagueGame, report: DayReport) {
 function tickDaily(state: LeagueState, report: DayReport) {
   const yesterday = isoAddDays(state.currentDate, -1);
   for (const p of state.players) {
-    // fatigue recovery: only if the player did NOT play yesterday (no b2b recovery)
-    if (p.lastGameDate !== yesterday && p.lastGameDate !== state.currentDate) p.stamina = Math.min(1, p.stamina + 0.25);
+    // Fatigue recovery is proportional, not flat: a day off closes ~42% of
+    // the gap instead of a fixed +0.25 that erased a heavy night in one day.
+    // Heavy-minutes players now hover below 1.0 across dense stretches and
+    // b2b fatigue actually accumulates — which is what makes staminaF and the
+    // in-game stamina penalties matter.
+    if (p.lastGameDate !== yesterday && p.lastGameDate !== state.currentDate) {
+      p.stamina = Math.min(1, p.stamina + (1 - p.stamina) * 0.42);
+    }
     // injury countdown
     if (p.injury && p.injury.weeksRemaining > 0) {
       p.injury.weeksRemaining -= 1 / 7; // day-based countdown in weeks
@@ -539,10 +564,22 @@ function maybeAdvanceRound(state: LeagueState, report: DayReport) {
       nextGameDate: isoAddDays(state.currentDate, 2),
     });
 
+    // Home-court goes to the team with the better regular-season record —
+    // bracket order alone doesn't guarantee it (upsets scramble seeds, and
+    // the Finals pair is just "whoever won each conference").
+    const byRecord = (x: string, y: string): [string, string] => {
+      const tx = state.teams.find((t) => t.id === x);
+      const ty = state.teams.find((t) => t.id === y);
+      const wx = tx?.wins ?? 0;
+      const wy = ty?.wins ?? 0;
+      return wx > wy || (wx === wy && (tx?.abbr ?? "") < (ty?.abbr ?? "")) ? [x, y] : [y, x];
+    };
+
     if (next === "FINALS") {
       const winners = seriesOfRound.map((s) => s.winnerId!);
       if (winners.length !== 2) return; // need exactly two conference champions
-      po.series.push(mkSeries("FINALS", null, winners[0], winners[1]));
+      const [a, b] = byRecord(winners[0], winners[1]);
+      po.series.push(mkSeries("FINALS", null, a, b));
       report.notes.push("总决赛对阵确定");
       return;
     }
@@ -550,7 +587,8 @@ function maybeAdvanceRound(state: LeagueState, report: DayReport) {
     for (const conf of ["EAST", "WEST"] as const) {
       const confWinners = seriesOfRound.filter((s) => s.conference === conf).map((s) => s.winnerId!);
       for (let i = 0; i + 1 < confWinners.length; i += 2) {
-        po.series.push(mkSeries(next, conf, confWinners[i], confWinners[i + 1]));
+        const [a, b] = byRecord(confWinners[i], confWinners[i + 1]);
+        po.series.push(mkSeries(next, conf, a, b));
       }
     }
     report.notes.push(`${next} 对阵确定`);
@@ -627,12 +665,17 @@ export function applyDevelopment(state: LeagueState): { playerId: string; name: 
     const rng = rngFor(state.seed, `dev:${state.season}:${p.id}`);
     const overall = p.ratings.overall;
     const pot = p.ratings.potential;
+    // Growth budget: explicit potential when scouted (synthetic classes);
+    // otherwise the seeded growthLeft estimate — real-data players have no
+    // potential, and without this fallback the field is dead data.
+    const budget = pot != null
+      ? Math.max(0, Math.min(20, pot - overall))
+      : Math.max(0, p.development?.growthLeft ?? 0);
     let delta = 0;
-    if (p.age <= 24 && pot != null) {
-      const gap = Math.max(0, Math.min(20, pot - overall));
+    if (p.age <= 28 && budget > 0) {
       const s = p.seasonStats[0];
       const mf = devMinutesFactor(s?.g ?? 0, s && s.g > 0 ? s.mp / s.g : 0);
-      delta = rng.chance(0.25 + gap * 0.05 + mf.chance) ? rng.int(1, Math.max(1, Math.round(gap / 2) + mf.ceil)) : rng.int(-1, 1);
+      delta = rng.chance(0.25 + budget * 0.05 + mf.chance) ? rng.int(1, Math.max(1, Math.round(budget / 2) + mf.ceil)) : rng.int(-1, 1);
     } else if (p.age <= 28) {
       delta = rng.chance(0.4) ? rng.int(0, 2) : rng.int(-1, 0);
     } else if (p.age >= 32) {
@@ -656,7 +699,11 @@ export function applyDevelopment(state: LeagueState): { playerId: string; name: 
     };
     p.development = {
       trajectory: delta > 0 ? "GROWING" : delta < 0 ? "DECLINING" : "STABLE",
-      growthLeft: Math.max(0, (pot ?? newOverall) - newOverall),
+      // potential-driven budgets re-derive each year; growthLeft-driven
+      // budgets are consumed — growth spent is growth gone.
+      growthLeft: pot != null
+        ? Math.max(0, pot - newOverall)
+        : Math.max(0, (p.development?.growthLeft ?? 0) - Math.max(0, delta)),
       lastDelta: delta,
     };
     // Morale drift: losing wears on good players (esp. aging vets), a

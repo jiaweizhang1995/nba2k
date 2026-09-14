@@ -19,6 +19,9 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Underscore-prefixed files are throwaway calibration/debug scripts —
+    // excluded from typecheck too (tsconfig exclude).
+    "scripts/_*.ts",
   ]),
 ]);
 
