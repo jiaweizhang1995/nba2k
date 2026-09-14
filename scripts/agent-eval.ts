@@ -35,6 +35,14 @@ async function main() {
     return;
   }
 
+  if (cmd === "resume" || cmd === "observe") {
+    const id = process.argv[3];
+    if (!id) throw new Error("需要 evalId");
+    const s = await stepEvaluation(id);
+    console.log(s.observation ?? JSON.stringify(s, null, 1));
+    return;
+  }
+
   const evalId = process.argv[3];
   if (!evalId) throw new Error("需要 evalId");
 
