@@ -8,6 +8,8 @@
 //    因此回放（不调用模型）可以得到相同结果
 //  - 只记录模型主动提交的公开决策摘要，不获取隐藏思维链
 
+import fs from "node:fs";
+import path from "node:path";
 import { and, asc, desc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
 import {
@@ -26,7 +28,7 @@ import {
 import { capSnapshot, seasonMoney } from "@/domain/salary";
 import { pickValue } from "@/domain/trade";
 import { askingSalaryFor, isRestrictedFa } from "@/domain/freeagency";
-import { providerChat, STAGE_ALLOWED_ACTIONS, type GmAction } from "@/lib/eval-provider";
+import { providerChat, STAGE_ALLOWED_ACTIONS, type GmAction, type GmActionPayload } from "@/lib/eval-provider";
 import { decryptKey, encryptKey, maskKey } from "@/lib/eval-crypto";
 import {
   advanceSim,
@@ -133,7 +135,7 @@ export async function createEvaluation(input: {
   teamShortId: string;
   seed: number;
   years: 3 | 5;
-  provider: "STUB" | "OPENAI_COMPAT";
+  provider: "STUB" | "OPENAI_COMPAT" | "AGENT";
   baseUrl?: string;
   model?: string;
   apiKey?: string;
@@ -178,6 +180,43 @@ function encryptForEval(key: string): string {
 }
 function decryptForEval(enc: string): string | null {
   return decryptKey(enc);
+}
+
+// ---------------------------------------------------------------------------
+// AGENT provider — the CLI agent (or any out-of-process GM) drives the eval
+// through a file queue: stepEvaluation returns the observation and waits;
+// the agent writes its action JSON to the queue file; the next step consumes
+// it. Determinism does not apply — the agent is a real decision-maker.
+// ---------------------------------------------------------------------------
+
+const AGENT_QUEUE_DIR = path.join(process.cwd(), "data", "eval-queue");
+
+export function agentQueuePath(evalId: string): string {
+  return path.join(AGENT_QUEUE_DIR, `${evalId}.json`);
+}
+
+/** Queue an action for an AGENT-provider evaluation. */
+export function writeAgentAction(evalId: string, action: GmActionPayload): void {
+  fs.mkdirSync(AGENT_QUEUE_DIR, { recursive: true });
+  fs.writeFileSync(agentQueuePath(evalId), JSON.stringify(action));
+}
+
+function readAgentAction(evalId: string): GmActionPayload | null {
+  const p = agentQueuePath(evalId);
+  if (!fs.existsSync(p)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(p, "utf8")) as GmActionPayload;
+  } catch {
+    return null;
+  }
+}
+
+function clearAgentAction(evalId: string): void {
+  try {
+    fs.unlinkSync(agentQueuePath(evalId));
+  } catch {
+    /* already gone */
+  }
 }
 
 export function listEvaluations() {
@@ -707,7 +746,11 @@ interface StepOutcome {
   stage: string;
   seasonsDone: number;
   done: boolean;
-  lastTurn?: { action: string; decision?: string; summary: string; ok: boolean };
+  lastTurn?: { action: string; decision?: string; summary: string; ok: boolean; data?: Record<string, unknown> };
+  /** AGENT provider: no queued action — the harness waits for the CLI agent. */
+  waiting?: boolean;
+  /** The observation the agent should decide on (returned while waiting). */
+  observation?: string;
 }
 
 // 进程内步进锁：防止多个客户端（页面循环 + API）并发步进同一评测
@@ -819,6 +862,21 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
     decision = srcTurn.decision ?? undefined;
   } else {
     const observation = buildObservation(evalCtx, stage);
+    if (evalRow.provider === "AGENT") {
+      // Out-of-process GM: wait for a queued action, or consume it.
+      const queued = readAgentAction(id);
+      if (!queued) {
+        return { status: "RUNNING", stage, seasonsDone: evalRow.seasonsDone, done: false, waiting: true, observation };
+      }
+      clearAgentAction(id);
+      action = queued.action;
+      params = queued.params ?? {};
+      decision = queued.decision;
+      goals = queued.goals;
+      expected = queued.expected;
+      risks = queued.risks;
+      rawResponse = JSON.stringify(queued).slice(0, 2000);
+    } else {
     const myPlayers = db
       .select()
       .from(playersT)
@@ -1000,6 +1058,7 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
     goals = r.action!.goals;
     expected = r.action!.expected;
     risks = r.action!.risks;
+    }
   }
 
   // 权限白名单：阶段不允许的动作直接拒绝（不执行）
@@ -1203,7 +1262,7 @@ async function stepEvaluationInner(id: string): Promise<StepOutcome> {
     stage: newStage,
     seasonsDone: evalRow.seasonsDone,
     done: false,
-    lastTurn: { action, decision, summary: toolResult.summary, ok: executedOk },
+    lastTurn: { action, decision, summary: toolResult.summary, ok: executedOk, data: toolResult.data },
   };
 }
 

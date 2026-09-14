@@ -8,7 +8,7 @@ export const evalCreateSchema = z.object({
   teamShortId: z.string().min(1).max(8),
   seed: z.number().int().min(0).max(2 ** 31 - 1),
   years: z.union([z.literal(3), z.literal(5)]),
-  provider: z.enum(["STUB", "OPENAI_COMPAT"]),
+  provider: z.enum(["STUB", "OPENAI_COMPAT", "AGENT"]),
   baseUrl: z.string().optional(),
   model: z.string().optional(),
   apiKey: z.string().optional(),

@@ -16,6 +16,7 @@ import {
   listEvaluations,
   startReplay,
   isActionAllowed,
+  writeAgentAction,
 } from "@/server/eval";
 import { parseActionJson, stubAction, STAGE_ALLOWED_ACTIONS } from "@/lib/eval-provider";
 import { encryptKey, decryptKey, maskKey } from "@/lib/eval-crypto";
@@ -255,6 +256,40 @@ describe("AI tool permissions", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  it("AGENT provider waits for queued actions, executes them once, enforces stage whitelist", async () => {
+    await setupBase();
+    const { id } = await createEvaluation({
+      name: "AGENT 测试",
+      baseSaveId,
+      teamShortId,
+      seed: 8899,
+      years: 3,
+      provider: "AGENT",
+    });
+    // 无动作 → 等待，不消耗回合
+    const s1 = await stepEvaluation(id);
+    expect(s1.waiting).toBe(true);
+    expect(s1.observation).toBeTruthy();
+    expect(s1.done).toBe(false);
+    expect(getEvaluationDetail(id).turns).toHaveLength(0);
+
+    // 越阶段动作 → 拒绝且记回合
+    writeAgentAction(id, { action: "draft_pick", params: { prospectId: "x" }, decision: "越权" });
+    const s2 = await stepEvaluation(id);
+    expect(s2.lastTurn?.action).toBe("draft_pick");
+    expect(s2.lastTurn?.ok).toBe(false);
+    expect(getEvaluationDetail(id).turns.at(-1)!.ok).toBe(false);
+
+    // 合法动作执行且只消费一次
+    writeAgentAction(id, { action: "set_strategy", params: { text: "测试策略" }, decision: "设策略" });
+    const s3 = await stepEvaluation(id);
+    expect(s3.lastTurn?.ok).toBe(true);
+    const s4 = await stepEvaluation(id);
+    expect(s4.waiting).toBe(true); // 队列已空
+    const turns = getEvaluationDetail(id).turns;
+    expect(turns.filter((t) => t.action === "set_strategy")).toHaveLength(1);
   });
 });
 

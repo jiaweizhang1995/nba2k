@@ -10,6 +10,14 @@ async function main() {
   const years = Number(process.argv[3] ?? "5") as 3 | 5;
   const seed = Number(process.argv[4] ?? "20260914");
   const provider = (process.argv[5] ?? "STUB") as "STUB" | "OPENAI_COMPAT";
+  // For OPENAI_COMPAT: EVAL_BASE_URL / EVAL_MODEL / EVAL_API_KEY env vars.
+  const providerCfg =
+    provider === "OPENAI_COMPAT"
+      ? { baseUrl: process.env.EVAL_BASE_URL!, model: process.env.EVAL_MODEL!, apiKey: process.env.EVAL_API_KEY! }
+      : {};
+  if (provider === "OPENAI_COMPAT" && (!providerCfg.baseUrl || !providerCfg.model || !providerCfg.apiKey)) {
+    throw new Error("OPENAI_COMPAT 需要 EVAL_BASE_URL / EVAL_MODEL / EVAL_API_KEY 环境变量");
+  }
 
   const t0 = Date.now();
   const save = await createSave({ name: `验收基准-${team}-${years}年`, teamId: team, seed });
@@ -22,6 +30,7 @@ async function main() {
     seed,
     years,
     provider,
+    ...providerCfg,
   });
   console.log(`eval: ${id} — running...`);
 
@@ -47,6 +56,13 @@ async function main() {
   console.log(`  动作分布: ${[...actions.entries()].map(([a, n]) => `${a}x${n}`).join(" ")}`);
   const trades = turns.filter((t) => t.action === "propose_trade" || t.action === "respond_trade");
   for (const t of trades.slice(0, 12)) console.log(`    [${t.stage}] ${t.action}: ${t.decision ?? ""} → ${(t.resultSummary ?? "").slice(0, 90)}`);
+  const errs = turns.filter((t) => t.error);
+  if (errs.length) {
+    console.log(`  错误回合 ${errs.length}:`);
+    for (const t of errs.slice(0, 8)) console.log(`    [${t.stage}] ${t.action}: ${(t.error ?? "").slice(0, 100)}`);
+  }
+  const signings = turns.filter((t) => ["sign_free_agent", "extend_contract", "waive_player", "decline_option", "respond_offer_sheet", "draft_pick"].includes(t.action));
+  for (const t of signings.slice(0, 20)) console.log(`    [${t.stage}] ${t.action}: ${t.decision ?? ""} → ${(t.resultSummary ?? "").slice(0, 90)}`);
   process.exit(0);
 }
 
