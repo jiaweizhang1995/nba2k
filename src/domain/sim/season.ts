@@ -88,6 +88,8 @@ export interface LeagueState {
   playoffs: PlayoffState | null;
   /** Manager-set rotation per team id (starters + minute targets). Optional: absent = auto rotation. */
   rotation?: Record<string, RotationConfig>;
+  /** When true, no new injuries are generated (existing ones still heal). */
+  injuriesDisabled?: boolean;
 }
 
 export const SEASON_START_MONTH_DAY = "-10-21";
@@ -406,7 +408,7 @@ function simAndApply(state: LeagueState, g: LeagueGame, report: DayReport) {
   // Injuries: per team per game, weighted by minutes, age — and fatigue
   // (tired bodies break down more often).
   const injRng = rngFor(state.seed, `injury:${g.id}`);
-  for (const teamPlayers of [homePlayers, awayPlayers]) {
+  for (const teamPlayers of state.injuriesDisabled ? [] : [homePlayers, awayPlayers]) {
     if (!injRng.chance(0.16)) continue;
     const candidates = teamPlayers.filter((p) => p.status === "ACTIVE");
     if (!candidates.length) continue;

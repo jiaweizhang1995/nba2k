@@ -438,6 +438,7 @@ export function loadLeagueState(saveId: string, opts: { includeGames?: boolean }
     games,
     playoffs: ((save.phaseState as Record<string, unknown> | null)?.playoffs as LeagueState["playoffs"]) ?? null,
     rotation: ((save.phaseState as Record<string, unknown> | null)?.rotation as LeagueState["rotation"]) ?? {},
+    injuriesDisabled: Boolean((save.phaseState as Record<string, unknown> | null)?.injuriesDisabled),
   };
 }
 
