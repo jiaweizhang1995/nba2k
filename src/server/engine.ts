@@ -561,6 +561,32 @@ export interface AdvanceResult {
 
 const shortId = (full: string) => full.split(":").slice(1).join(":");
 
+/** Depth-chart role by overall rank — the same rule trades, FA and season start share. */
+function roleForRank(overall: number, rank: number): string {
+  return rank === 0 && overall >= 86 ? "STAR"
+    : rank === 1 && overall >= 84 ? "STAR"
+    : rank < 5 ? "STARTER"
+    : rank === 5 && overall >= 79 ? "SIXTH_MAN"
+    : rank < 10 ? "ROTATION"
+    : "BENCH";
+}
+
+/** Re-derive one team's roles from current overalls. Signings and development
+ * would otherwise leave stars stamped BENCH (every FA/waive path resets it). */
+function recomputeTeamRoles(q: Pick<ReturnType<typeof getDb>, "select" | "update">, saveId: string, teamId: string) {
+  const roster = q
+    .select()
+    .from(playersT)
+    .where(and(eq(playersT.saveId, saveId), eq(playersT.teamId, teamId)))
+    .all()
+    .filter((p) => p.status === "ACTIVE" || p.status === "INJURED");
+  const sorted = [...roster].sort((a, b) => b.ratings.overall - a.ratings.overall);
+  sorted.forEach((p, i) => {
+    const role = roleForRank(p.ratings.overall, i);
+    if (p.role !== role) q.update(playersT).set({ role: role as never }).where(eq(playersT.id, p.id)).run();
+  });
+}
+
 export function advanceSim(saveId: string, mode: AdvanceMode, marketDiag?: Record<string, number>): AdvanceResult {
   const save = getSave(saveId);
   if (!save) throw new EngineError("NO_SAVE", "存档不存在");
@@ -1330,7 +1356,7 @@ export function executeTrade(saveId: string, parties: TradeParty[], opts: { godM
       const roster = tx.select().from(playersT).where(and(eq(playersT.saveId, saveId), eq(playersT.teamId, `${saveId}:${party.teamId}`))).all();
       const sorted = [...roster].sort((a, b) => b.ratings.overall - a.ratings.overall);
       sorted.forEach((p, i) => {
-        const role = i === 0 && p.ratings.overall >= 86 ? "STAR" : i === 1 && p.ratings.overall >= 84 ? "STAR" : i < 5 ? "STARTER" : i === 5 && p.ratings.overall >= 79 ? "SIXTH_MAN" : i < 10 ? "ROTATION" : "BENCH";
+        const role = roleForRank(p.ratings.overall, i);
         // Fresh-start bump: a player who just moved wanted out or wanted a
         // new scene — morale rebounds toward ~60. Staying players take the
         // role-shuffle hit instead.
@@ -2485,6 +2511,13 @@ export function startNewSeason(saveId: string) {
       logEvent(saveId, "FA", `自由市场收官：AI 球队按市场价补强 ${aiSigned} 人次`, { signings: aiSigned });
     }
 
+    // Opening-night depth chart: every signing/waiver/development path above
+    // stamps role=BENCH or leaves stale roles — recompute from current overalls
+    // so a re-signed star doesn't start the year as a "bench" player.
+    for (const t of tx.select().from(teamsT).where(eq(teamsT.saveId, saveId)).all()) {
+      recomputeTeamRoles(tx, saveId, t.id);
+    }
+
     // update AI phases from last season records
     // (records already reset — compute from standings before reset is skipped for simplicity)
 
@@ -2515,9 +2548,12 @@ export function startNewSeason(saveId: string) {
 
     // phaseState 里存着 userTeamId/rotation 等用户配置，不能整体清空——
     // 只丢弃与旧赛季推进相关的瞬时状态（playoffs/draft 等）。
-    const prevPs = (save.phaseState as Record<string, unknown> | null) ?? {};
+    const prevPs = getPhaseState(saveId);
     const carried: Record<string, unknown> = {};
     if (prevPs.userTeamId) carried.userTeamId = prevPs.userTeamId;
+    // The manager's rotation is multi-season intent — keep it. Stale starter
+    // ids are validated per game in buildRotation and fall back to auto.
+    if (prevPs.rotation) carried.rotation = prevPs.rotation;
     // Dead money survives the season rollover — prune only fully-expired
     // entries (those below the new season), keep the rest on the books.
     if (prevPs.deadCap) {
@@ -2653,7 +2689,7 @@ export function submitFaOffer(saveId: string, playerId: string, years: number, a
   };
   const competition = aiCompetitionLevel(faPlayer, save.seed, save.season);
   // 盐值不含时间：同一存档+种子+同一报价必须得到同一结果（回放确定性）
-  const evalResult = evaluateOffer(faPlayer, { years, avgSalary }, team, save.seed, `fa:${save.season}:${playerId}`, competition, save.season);
+  const evalResult = evaluateOffer(faPlayer, { years, avgSalary }, team, save.seed, `fa:${save.season}:${playerId}`, competition, save.season, isBird);
 
   const recordOffer = (status: "ACCEPTED" | "REJECTED", note?: string) =>
     db
@@ -2695,6 +2731,7 @@ export function submitFaOffer(saveId: string, playerId: string, years: number, a
         })
         .where(eq(playersT.id, `${saveId}:${playerId}`))
         .run();
+      recomputeTeamRoles(db, saveId, inc);
       recordOffer("REJECTED", "母队匹配报价");
       logEvent(saveId, "FA", `${shortId(inc)} 匹配报价单，受限自由球员 ${player.name} 留队`, { playerId, teamId: inc, avgSalary });
       return { accepted: false as const, reason: `受限自由球员：母队 ${shortId(inc)} 匹配了你的报价，球员留队`, interest: evalResult.interest };
@@ -2720,6 +2757,9 @@ export function submitFaOffer(saveId: string, playerId: string, years: number, a
       })
       .where(eq(playersT.id, `${saveId}:${playerId}`))
       .run();
+    // The new arrival changes the pecking order immediately — a re-signed
+    // star shouldn't sit behind the rotation players he replaced.
+    recomputeTeamRoles(tx, saveId, `${saveId}:${userShort}`);
   });
   // Consume the team's one mid-level exception when this signing used it.
   // Minimum/cap-space/Bird signings don't touch it.

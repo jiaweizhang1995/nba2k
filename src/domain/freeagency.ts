@@ -88,6 +88,7 @@ export function evaluateOffer(
   salt: string,
   competitorInterest: number = 0,
   season: number = 2027,
+  incumbent: boolean = false,
 ): FaEvaluation {
   const rng = rngFor(seed, salt);
   const reasons: string[] = [];
@@ -125,6 +126,14 @@ export function evaluateOffer(
 
   interest -= competitorInterest * 0.35;
   if (competitorInterest > 0) reasons.push(`有其他球队竞争，抬高了签约门槛`);
+
+  // Incumbents win ties: a bird-rights re-sign carries a loyalty discount —
+  // without it a max-salary superstar asking at the cap ceiling would be
+  // mathematically unsignable (no room to outbid competition above the max).
+  if (incumbent) {
+    interest += 10;
+    reasons.push(`母队忠诚加成 +10`);
+  }
 
   interest += rng.float(-5, 5);
   interest = Math.max(0, Math.min(100, interest));

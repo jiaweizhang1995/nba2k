@@ -871,3 +871,49 @@ describe("morale has teeth: monthly drift + disgruntled discount", () => {
     expect(playerValue(mad, 2027).breakdown.join(" ")).toContain("逼宫");
   });
 });
+
+describe("manager rotation survives the season rollover", () => {
+  it("startNewSeason carries phaseState.rotation and refreshes stale roles", async () => {
+    const s = await createSave({ name: "rotation carry", seed: 777301 });
+    const sid = s.saveId;
+    const short = s.teamId.split(":").pop()!;
+    const db = getDb();
+    const roster = db
+      .select()
+      .from(playersT)
+      .where(and(eq(playersT.saveId, sid), eq(playersT.teamId, `${sid}:${short}`)))
+      .all()
+      .sort((a, b) => b.ratings.overall - a.ratings.overall);
+    const starters = roster.slice(0, 5).map((p) => p.id.split(":").slice(1).join(":"));
+    const minutes = Object.fromEntries(starters.map((id) => [id, 34]));
+    setRotation(sid, short, starters, minutes);
+    expect((getPhaseState(sid).rotation as Record<string, unknown>)[short]).toBeTruthy();
+
+    // Play the whole year out so the offseason machinery runs for real.
+    advanceSim(sid, "SEASON");
+    makeDraftPick(sid, { simulateAll: true });
+    expect(getSave(sid)!.phase).toBe("FREE_AGENCY");
+    startNewSeason(sid);
+
+    // The rotation must still be there — dropping it silently benched
+    // manager-configured starters for a whole season.
+    const rot = (getPhaseState(sid).rotation as Record<string, { starters: string[] }>)[short];
+    expect(rot?.starters).toEqual(starters);
+    // And no active player on any roster may sit as BENCH above a
+    // higher-rated teammate's slot that should rank him — the recompute
+    // runs on every team at the season boundary.
+    for (const t of db.select().from(teamsT).where(eq(teamsT.saveId, sid)).all()) {
+      const team = db
+        .select()
+        .from(playersT)
+        .where(and(eq(playersT.saveId, sid), eq(playersT.teamId, t.id)))
+        .all()
+        .filter((p) => p.status === "ACTIVE" || p.status === "INJURED")
+        .sort((a, b) => b.ratings.overall - a.ratings.overall);
+      const topTwo = team.slice(0, 2);
+      for (const p of topTwo) {
+        expect(["STAR", "STARTER"]).toContain(p.role);
+      }
+    }
+  }, 120_000);
+});
