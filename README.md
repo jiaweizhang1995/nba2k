@@ -11,12 +11,14 @@ An NBA general manager simulator designed for AI Agents. An agent uses MCP to in
 This is the main way to play. You do not need to edit MCP configuration yourself. Send this prompt to your AI:
 
 ```text
-请帮我配置并运行这个 NBA2K 项目：
-1. 在项目根目录安装依赖（npm install）。
-2. 把 scripts/mcp-gm-server.ts 注册为名为 nba-gm 的 MCP server，使用 npx tsx 启动，并把工作目录设为这个项目根目录。
-3. 如果已有同名配置，请更新它，不要重复创建。
-4. 重新加载 MCP 后，调用 gm_saves 或 gm_teams 验证连接。
-5. 配置完成后告诉我验证结果，不要修改游戏规则或手写数据库。
+请帮我配置并运行这个 NBA2K 项目。
+仓库地址：https://github.com/jiaweizhang1995/nba2k
+1. 如果本地还没有这个项目，请先 clone 到合适的目录，然后进入项目根目录。
+2. 在项目根目录安装依赖（npm install）。
+3. 把 scripts/mcp-gm-server.ts 注册为名为 nba-gm 的 MCP server，使用 npx tsx 启动，并把工作目录设为这个项目根目录。
+4. 如果已有同名配置，请更新它，不要重复创建。
+5. 重新加载 MCP 后，调用 gm_saves 或 gm_teams 验证连接。
+6. 配置完成后告诉我验证结果，不要修改游戏规则或手写数据库。
 
 配置好以后，开一个湖人存档。先观察阵容、薪资和选秀权，再给我三套交易方向；重大交易和签约等我确认后再执行。
 ```
