@@ -1,5 +1,5 @@
 /**
- * nba-gm MCP server — Devin 通过结构化工具调用直接游玩《HARDWOOD GM》真实存档，
+ * nba-gm MCP server — Devin 通过结构化工具调用直接游玩《NBA2K》真实存档，
  * 不经过评测层（无回合上限、无克隆隔离）。动作直调
  * src/server/engine.ts 的规则函数，与 Web UI 同源。
  *

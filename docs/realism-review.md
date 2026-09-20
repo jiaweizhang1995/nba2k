@@ -1,4 +1,4 @@
-# HARDWOOD GM 代码与真实性 Review（只读）
+# NBA2K 代码与真实性 Review（只读）
 
 Review 日期：2026-09-14
 范围：领域层规则、比赛/赛季模拟、server 引擎、API、数据导入、测试覆盖

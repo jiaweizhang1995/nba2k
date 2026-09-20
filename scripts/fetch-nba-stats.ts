@@ -14,7 +14,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 
-const UA = "HARDWOOD-GM-Importer/1.0 (local simulation game; factual stats import)";
+const UA = "NBA2K-Importer/1.0 (local simulation game; factual stats import)";
 const API = "https://en.wikipedia.org/w/api.php";
 const BATCH = 25;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

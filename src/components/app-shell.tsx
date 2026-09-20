@@ -52,7 +52,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     <div className="flex min-h-screen">
       <aside className="w-14 md:w-44 shrink-0 border-r border-[var(--border)] bg-[var(--bg-panel)] flex flex-col sticky top-0 h-screen overflow-y-auto">
         <div className="px-3 py-4 border-b border-[var(--border)]">
-          <div className="text-[13px] font-bold tracking-wider text-[var(--accent)] hidden md:block">HARDWOOD GM</div>
+          <div className="text-[13px] font-bold tracking-wider text-[var(--accent)] hidden md:block">NBA2K</div>
           <div className="text-[10px] text-[var(--text-dim)] hidden md:block">职业篮球经理模拟</div>
         </div>
         <nav className="flex-1 py-2">

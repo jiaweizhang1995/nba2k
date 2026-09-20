@@ -19,7 +19,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 
 const API = "https://en.wikipedia.org/w/api.php";
-const UA = "HARDWOOD-GM-Importer/1.0 (local simulation game; factual roster import)";
+const UA = "NBA2K-Importer/1.0 (local simulation game; factual roster import)";
 const SEASON_LABEL = 2027; // 2026-27
 const LIST_PAGES: { url: string; conference: "EAST" | "WEST"; page: string }[] = [
   { url: "https://en.wikipedia.org/wiki/List_of_current_NBA_Eastern_Conference_team_rosters", conference: "EAST", page: "List of current NBA Eastern Conference team rosters" },

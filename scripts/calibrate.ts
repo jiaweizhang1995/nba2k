@@ -17,7 +17,7 @@ if (!process.env.NBA2K_DB_PATH) {
   if (fs.existsSync(process.env.NBA2K_DB_PATH)) fs.rmSync(process.env.NBA2K_DB_PATH);
 }
 
-const UA = "HARDWOOD-GM-Importer/1.0 (local simulation game)";
+const UA = "NBA2K-Importer/1.0 (local simulation game)";
 
 interface PayloadPlayer {
   externalId: string;

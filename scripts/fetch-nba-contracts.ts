@@ -12,7 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 
-const UA = "HARDWOOD-GM-Importer/1.0 (local simulation game; factual contract import)";
+const UA = "NBA2K-Importer/1.0 (local simulation game; factual contract import)";
 const SEASON = 2027; // ESPN season key for the 2026-27 campaign
 
 // ESPN team ids verified against each roster's displayName on 2026-09-13.
