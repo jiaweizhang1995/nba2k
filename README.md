@@ -6,38 +6,24 @@ An NBA general manager simulator designed for AI Agents. An agent uses MCP to in
 
 ## Agent 模式 / Agent mode
 
-需要 Node.js 20 或更高版本，以及支持 MCP 的 Agent 客户端。
+这是本项目的主要玩法。你不需要自己编辑 MCP 配置，直接把下面这段话发给你正在使用的 AI：
 
-Requires Node.js 20 or newer and an MCP-capable agent client.
+This is the main way to play. You do not need to edit MCP configuration yourself. Send this prompt to your AI:
 
-```bash
-git clone https://github.com/jiaweizhang1995/nba2k.git
-cd nba2k
-npm install
+```text
+请帮我配置并运行这个 NBA2K 项目：
+1. 在项目根目录安装依赖（npm install）。
+2. 把 scripts/mcp-gm-server.ts 注册为名为 nba-gm 的 MCP server，使用 npx tsx 启动，并把工作目录设为这个项目根目录。
+3. 如果已有同名配置，请更新它，不要重复创建。
+4. 重新加载 MCP 后，调用 gm_saves 或 gm_teams 验证连接。
+5. 配置完成后告诉我验证结果，不要修改游戏规则或手写数据库。
+
+配置好以后，开一个湖人存档。先观察阵容、薪资和选秀权，再给我三套交易方向；重大交易和签约等我确认后再执行。
 ```
 
-把下面的 MCP server 配置加入你的 Agent 客户端：
+完成配置后，AI 就能通过 MCP 直接和你一起玩真实存档：读取球队、分析资产、提出交易、管理阵容、选秀、签约，并推进多个赛季。
 
-Add this MCP server to your agent client configuration:
-
-```json
-{
-  "mcpServers": {
-    "nba-gm": {
-      "command": "npx",
-      "args": ["tsx", "scripts/mcp-gm-server.ts"]
-    }
-  }
-}
-```
-
-配置完成后，让 Agent 使用 `nba-gm` 工具开始游戏。例如：
-
-Then ask the agent to start a game with `nba-gm`. For example:
-
-> 开一个湖人存档。先观察阵容、薪资和选秀权，然后给我三套交易方向；重大交易和签约等我确认后再执行。
->
-> Start a Lakers save. Inspect the roster, salary situation, and draft picks, then give me three trade directions. Wait for my approval before executing major trades or signings.
+Once configured, your AI can play the real save with you through MCP: inspect teams, analyze assets, propose trades, manage the roster, draft players, sign free agents, and advance multiple seasons.
 
 常用工具 / Common tools:
 
