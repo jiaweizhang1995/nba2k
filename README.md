@@ -9,7 +9,7 @@ A browser-based basketball general manager simulator. Manage an NBA team, make t
 需要 Node.js 20 或更高版本 / Requires Node.js 20 or newer.
 
 ```bash
-git clone https://github.com/jiaweizhang1995/hardwood-gm.git
+git clone https://github.com/jiaweizhang1995/nba2k.git
 cd hardwood-gm
 npm install
 npm run dev
