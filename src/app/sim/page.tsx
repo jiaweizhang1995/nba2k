@@ -40,6 +40,7 @@ const BULK_MODES: { mode: string; label: string; hint: string }[] = [
   { mode: "WEEK", label: "推进 1 周", hint: "模拟 7 天" },
   { mode: "MONTH", label: "推进 1 月", hint: "模拟 30 天" },
   { mode: "REGULAR_SEASON", label: "打完常规赛", hint: "推进至季后赛开始" },
+  { mode: "PLAYOFF_ROUND", label: "打完本轮季后赛", hint: "系列赛结束后停下，调整下一轮策略" },
   { mode: "PLAYOFFS", label: "打完季后赛", hint: "推进至总冠军产生" },
   { mode: "SEASON", label: "整个赛季", hint: "常规赛+季后赛，直至休赛期" },
 ];

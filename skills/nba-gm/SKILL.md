@@ -1,19 +1,34 @@
 ---
 name: nba-gm
-description: 与用户协作游玩 NBA GM 模拟器；可开新局、恢复 AGENT 存档、观察盘面并逐回合执行动作。
+description: 与用户协作游玩 NBA GM 模拟器；可开新存档、接续既有存档、观察盘面并逐回合执行动作。
 ---
 
 # NBA GM 协作游玩
 
-项目目录是 `/Users/jimmymacmini/workspace/nba2k`。开局先读一遍 `docs/agent-playbook.md` 的主流程，再运行 `scripts/agent-eval.ts`；具体动作参数和规则细节按需查阅。默认用户负责交易、选秀、重大签约和球队方向；agent 负责侦察、提出带风险的方案和执行已授权的日常操作。
+项目目录 `/Users/jimmymacmini/workspace/nba2k`。对局通过 `nba-gm` MCP 服务器操作（`.devin/mcp_config.json` 已注册，stdio 直连 `src/server/engine.ts`，操作**真实存档**——与 Web UI 同源，无评测层、无回合上限）。**不要跑 `npx tsx scripts/agent-eval.ts`，也不要手写 sqlite3**。
 
-开局：`TSX_TSCONFIG_PATH=scripts/tsconfig.json npx tsx scripts/agent-eval.ts new LAL 5`。
-恢复或只读观察：`... resume <evalId>`（返回最新观察，不写动作）。执行动作：`... act <evalId> '<JSON>'`。每次动作都必须抄观察中的稳定 ID，并填写 decision；先检查 allowedActions。不要猜 ID、绕过引擎或连续推进用户约定的决策节点。
+默认分工：用户负责交易、选秀、重大签约和球队方向；agent 负责侦察、提出带风险的方案、执行已授权的日常操作。
 
-遇到交易截止日、选秀、自由市场、季后赛或待处理报价，停下来用中文说明局面、推荐方案、备选方案和风险，等用户决定。用户说“托管本月/本阶段”后才自动推进。跨 CLI 接续时始终使用明确的 evalId；实际状态保存在项目 SQLite 中。
+## 工具速查
 
-动作参数和阶段规则的细节按需从 `docs/agent-playbook.md` 查阅。
+| 工具 | 用途 |
+|---|---|
+| `gm_new {team, name?, seed?}` | 开新存档（真实游戏档），返回 saveId+首份观察并记为当前对局 |
+| `gm_saves` / `gm_use {saveId?}` | 列出存档 / 切换当前对局 |
+| `gm_delete {saveId, confirm:true}` | 删档（不可恢复） |
+| `gm_observe` | 当前盘面：phase/allowedActions/阵容/帽/报价/事件；DRAFT 带选秀板、FA 带自由球员池 |
+| `gm_act {action, params, note?}` | 执行动作：阶段白名单+ID 解析校验 → 引擎执行 → 返回结果+新鲜观察；note 写入游戏事件流 |
+| `gm_auto {maxSteps?, autoPick?, finishFa?}` | 托管推进，到决策检查点自动停（来报价/轮到我选秀/阶段切换） |
+| `gm_teams` / `gm_roster {teamId?}` / `gm_find {query}` / `gm_picks {teamId?}` / `gm_resolve {names[]}` | 侦察：联盟概况/单队阵容+合同+签位/搜人/选秀权/名字→ID 预览 |
+| `gm_status` / `gm_events {limit?, category?}` | 战绩+赛程+冠军史 / 游戏事件流 |
 
-## 省回合技巧
+所有 saveId 参数可省略（服务器记当前对局，存于 `data/.gm-current.json`）。
 
-评测实际运行在 `evaluations.save_id` 指向的克隆存档；不要把 `base_save_id` 当作当前世界。需要直读 SQLite 时，先从 `evaluations` 表按 evalId 取 `save_id`，所有 players/contracts/picks/teams 查询都带这个 save_id。`get_market`、`get_assets` 等侦察动作会各消耗一个回合；能从本地库准确取得的数据先 SELECT，只有需要引擎计算的观察才花回合。每次 `act` 都计入 600 回合硬上限（5 年），要在推进、侦察和试探之间取舍。交易被拒绝时保留返回的 `feedback.valueDelta`：这是对方 GM 的精确价值差，可据此微调下一份报价；不要盲目重复相同报价。
+## 规则
+
+- `gm_act` 的 params 可直接写人名/缩写/描述（`"Collin Sexton"`、`"LAL"`、`"LAL 2027 R1"`），服务端解析成稳定 ID；解析失败返回候选且不执行。动作必须在观察的 `allowedActions` 内（按存档 phase 过滤）。
+- 决策检查点必须停下用中文说明局面 + 推荐方案 + 备选 + 风险，等用户拍板：交易截止日（2/6）前后、轮到我方选秀（draft.myNextPick）、自由市场开启、季后赛、inboundOffers/offerSheets 非空。用户明确说"托管本月/本阶段"后才用 `gm_auto`。
+- `gm_auto` 的 `autoPick`（替我选秀）和 `finishFa`（跳过自由市场直接收官）需用户明确授权才开。
+- 规则与策略细节（两段式选秀、140% 续约陷阱、鸟权帽上续约、二奢队 1:1、18 人上限、签位保护、底薪赛季中签约等）按需读 `docs/agent-playbook.md`。
+- 交易被拒时保留返回里的价值差反馈（`feedback[].verdict.valueDelta`）——那是对方 GM 的精确价差，用来微调下一份报价；不要盲目重复同一报价。
+- MCP 服务器若未加载（本会话启动早于配置写入），先告知用户重启会话让 `nba-gm` 工具出现，不要退回到 shell/直读 SQLite。

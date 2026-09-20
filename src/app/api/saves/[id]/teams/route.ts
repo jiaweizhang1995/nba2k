@@ -12,10 +12,13 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
     const save = getSave(id);
     if (!save) return fail("NO_SAVE", "存档不存在", 404);
     const db = getDb();
+    // The upcoming draft consumes the picks of the season just completed, and
+    // save.season is rolled forward on entering DRAFT (see prepareDraft).
+    const nextDraftYear = save.phase === "DRAFT" ? save.season - 1 : save.season;
     const teamRows = db.select().from(teamsT).where(eq(teamsT.saveId, id)).all();
     const out = teamRows.map((t) => {
       const roster = db.select().from(playersT).where(and(eq(playersT.saveId, id), eq(playersT.teamId, t.id))).all();
-      const picks = db.select().from(picksT).where(and(eq(picksT.saveId, id), eq(picksT.holderTeamId, t.id), eq(picksT.year, save.season + 1))).all();
+      const picks = db.select().from(picksT).where(and(eq(picksT.saveId, id), eq(picksT.holderTeamId, t.id), eq(picksT.year, nextDraftYear))).all();
       const snap = capSnapshot(roster, roster.length, deadCapHit(id, t.id.split(":").slice(1).join(":")));
       return {
         id: t.id.split(":").slice(1).join(":"),

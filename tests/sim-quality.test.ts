@@ -1,6 +1,6 @@
 // GAME-SIM v2.0 quality gates: determinism, realistic scoring/stat lines,
 // rotation minutes (auto + manager-set), injury & fatigue effects, schedule
-// integrity (no B2B, venue streaks, meeting caps) and overtime validity.
+// integrity (NBA-style B2B, venue streaks, meeting caps) and overtime validity.
 import { describe, expect, it, beforeAll } from "vitest";
 import { generateDemoLeague } from "@/data/demo";
 import { simulateGame, buildRotation, type SimTeam, type SimPlayer } from "@/domain/sim/game";
@@ -238,11 +238,11 @@ describe("伤病与疲劳影响", () => {
 });
 
 describe("赛程完整性", () => {
-  it("82 场/队；无背靠背；连主/连客 ≤3；单队单日最多 1 场；交手 ≤4 次", () => {
-    const demo = generateDemoLeague(7, 2027);
+  it.each([7, 42, 20260913, 555090])("82 场 / 41 主场、NBA 交手分布、合理休息与四月收官（seed %i）", (seed) => {
+    const demo = generateDemoLeague(seed, 2027);
     const state = {
       saveId: "s",
-      seed: 7,
+      seed,
       season: 2027,
       phase: "REGULAR_SEASON" as const,
       currentDate: "2026-10-21",
@@ -253,6 +253,10 @@ describe("赛程完整性", () => {
     };
     const games = createSchedule(state);
     expect(games).toHaveLength((30 * 82) / 2);
+    expect(games.at(-1)!.date >= "2027-04-01").toBe(true);
+    expect(games.at(-1)!.date <= "2027-04-15").toBe(true);
+    expect(games.some((g) => g.date >= "2027-02-13" && g.date <= "2027-02-18")).toBe(false);
+    expect(createSchedule(state)).toEqual(games);
 
     const byTeam = new Map<string, { dates: string[]; venues: ("H" | "A")[] }>();
     const meetings = new Map<string, number>();
@@ -265,16 +269,23 @@ describe("赛程完整性", () => {
       const mk = g.homeTeamId < g.awayTeamId ? `${g.homeTeamId}|${g.awayTeamId}` : `${g.awayTeamId}|${g.homeTeamId}`;
       meetings.set(mk, (meetings.get(mk) ?? 0) + 1);
     }
+    let sawBackToBack = false;
     for (const [teamId, { dates, venues }] of byTeam) {
       expect(dates).toHaveLength(82);
+      expect(venues.filter((v) => v === "H")).toHaveLength(41);
+      let b2b = 0;
       expect(new Set(dates).size).toBe(82); // 单日最多 1 场
       const sorted = [...dates].sort();
       for (let i = 1; i < sorted.length; i++) {
         const d1 = new Date(sorted[i - 1] + "T00:00:00Z").getTime();
         const d2 = new Date(sorted[i] + "T00:00:00Z").getTime();
-        expect((d2 - d1) / 86400000).toBeGreaterThanOrEqual(2); // 无背靠背
+        const gap = (d2 - d1) / 86400000;
+        expect(gap).toBeGreaterThanOrEqual(1); // 不会同日双赛
+        if (gap === 1) { sawBackToBack = true; b2b++; }
+        if (i > 1) expect((d2 - Date.parse(sorted[i - 2])) / 86400000).toBeGreaterThanOrEqual(3);
       }
-      // 连主/连客 ≤ 3（按时间排序后检查）
+      expect(b2b).toBeLessThanOrEqual(16);
+      // 最多六连主/客，按时间排序检查。
       const order = dates
         .map((d, i) => ({ d, v: venues[i] }))
         .sort((a, b) => a.d.localeCompare(b.d))
@@ -282,11 +293,17 @@ describe("赛程完整性", () => {
       let run = 1;
       for (let i = 1; i < order.length; i++) {
         run = order[i] === order[i - 1] ? run + 1 : 1;
-        expect(run).toBeLessThanOrEqual(3);
+        expect(run).toBeLessThanOrEqual(6);
       }
       void teamId;
     }
-    for (const count of meetings.values()) expect(count).toBeLessThanOrEqual(4);
+    expect(sawBackToBack).toBe(true);
+    for (const [key, count] of meetings) {
+      const [a, b] = key.split("|").map((id) => state.teams.find((t) => t.id === id)!);
+      if (a.conference !== b.conference) expect(count).toBe(2);
+      else if (a.division === b.division) expect(count).toBe(4);
+      else expect([3, 4]).toContain(count);
+    }
   });
 });
 

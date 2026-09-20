@@ -44,7 +44,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
     const confTeams = teamRows
       .filter((t) => t.conference === team.conference)
       .map((t) => ({ id: shortId(t.id), abbr: t.abbr, city: t.city, name: t.name, wins: t.wins, losses: t.losses }))
-      .sort((a, b) => b.wins - a.wins || a.abbr.localeCompare(b.abbr));
+      .sort((a, b) => b.wins / Math.max(1, b.wins + b.losses) - a.wins / Math.max(1, a.wins + a.losses) || a.abbr.localeCompare(b.abbr));
     const rank = confTeams.findIndex((t) => t.id === teamShort) + 1;
     const leader = confTeams[0];
 
@@ -278,7 +278,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
         currentDate: save.currentDate,
         season: save.season,
       },
-      standings: { rank, total: confTeams.length, leaderAbbr: teamAbbr.get(leader?.id ?? "") ?? "?", gamesBack: leader ? leader.wins - team.wins : 0 },
+      standings: { rank, total: confTeams.length, leaderAbbr: teamAbbr.get(leader?.id ?? "") ?? "?", gamesBack: leader ? ((leader.wins - team.wins) + (team.losses - leader.losses)) / 2 : 0 },
       trend: { last10: `${last10.filter(Boolean).length}-${last10.length - last10.filter(Boolean).length}`, streak: streak === 0 ? null : streak > 0 ? `${streak} 连胜` : `${-streak} 连败` },
       nextGame: nextGame ? { ...nextGame, backToBack: nextIsB2B } : null,
       upcoming,
@@ -296,7 +296,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
         luxuryTax: money.luxuryTax,
       },
       chemistry,
-      advisors,
+      advisors: advisors.filter((a) => !["draft", "fa"].includes(a.id)),
       pendingEvents,
     });
   } catch (e) {

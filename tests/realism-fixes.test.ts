@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { runLottery } from "@/domain/draft";
+import { clearProspectCache, generateScoutingReport, runLottery } from "@/domain/draft";
 import { applyDevelopment, type LeaguePlayer, type LeagueState } from "@/domain/sim/season";
+import { maxContractValue, seasonMoney } from "@/domain/salary";
 import { validateTrade, type TradePick, type TradeTeam } from "@/domain/trade";
 
 // ---- lottery: only picks 1-4 are drawn, 5-14 keep standings order ----
@@ -41,6 +42,21 @@ describe("lottery: 14 non-playoff teams, top-4 draw only", () => {
     // must produce a different RNG stream — sample several seeds.
     const alt = [1, 7, 99].map((s) => runLottery(s, 2028, pool, playoff).slice(0, 4).join(","));
     expect(new Set(alt).size).toBeGreaterThan(1);
+  });
+});
+
+describe("scouting reports survive process restarts", () => {
+  it("use persisted prospect ratings instead of the in-memory cache", () => {
+    const ratings = {
+      overall: 78, inside: 70, finishing: 75, threePoint: 82, freeThrow: 80,
+      playmaking: 72, rebounding: 61, perimeterD: 68, interiorD: 45,
+      usageTendency: 60, potential: 86, potentialLow: 80, potentialHigh: 90, confidence: 70,
+    };
+    const before = generateScoutingReport("prospect-restart", 1234, ratings);
+    clearProspectCache();
+    const after = generateScoutingReport("prospect-restart", 1234, ratings);
+    expect(after).toEqual(before);
+    expect(after.ceiling).toBe(90);
   });
 });
 
@@ -137,5 +153,16 @@ describe("Stepien: consecutive firsts already dealt in a prior trade still block
       [a, b], season, now,
     );
     expect(v.issues.some((i) => i.code === "STEPIEN")).toBe(false);
+  });
+});
+
+
+describe("NBA standard maximum salary", () => {
+  it.each([[0, 0.25], [6, 0.25], [7, 0.3], [9, 0.3], [10, 0.35], [20, 0.35]])("%i years of service", (years, percent) => {
+    expect(maxContractValue(years, 1, 2027).firstYear).toBeCloseTo(seasonMoney(2027).salaryCap * percent, 1);
+  });
+  it("anchors money to the official 2026–27 season", () => {
+    expect(seasonMoney(2027).salaryCap).toBe(164.96);
+    expect(seasonMoney(2027).secondApron).toBe(221.69);
   });
 });

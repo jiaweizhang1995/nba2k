@@ -24,7 +24,6 @@ export const saves = sqliteTable("saves", {
   dataProvider: text("data_provider").notNull().default("DEMO"),
   dataStatus: text("data_status").notNull().default("DEMO"),
   phaseState: text("phase_state", { mode: "json" }).$type<Record<string, unknown> | null>(),
-  isEval: integer("is_eval", { mode: "boolean" }).notNull().default(false),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
@@ -223,90 +222,3 @@ export type EventRow = typeof events.$inferSelect;
 export type FaOfferRow = typeof faOffers.$inferSelect;
 export type DataSourceRow = typeof dataSources.$inferSelect;
 export type AwardRow = typeof awards.$inferSelect;
-
-// ---------------------------------------------------------------------------
-// AI GM 评测（benchmark）模式：独立快照存档 + 受控工具 + 审计
-// ---------------------------------------------------------------------------
-
-export const evaluations = sqliteTable(
-  "evaluations",
-  {
-    id: text("id").primaryKey(),
-    name: text("name").notNull(),
-    baseSaveId: text("base_save_id").notNull(), // 快照来源（用户存档，永不修改）
-    saveId: text("save_id").notNull(), // 评测专用的独立克隆
-    provider: text("provider").notNull(), // "STUB" | "OPENAI_COMPAT"
-    baseUrl: text("base_url"),
-    model: text("model"),
-    apiKeyMasked: text("api_key_masked"),
-    apiKeyEnc: text("api_key_enc"), // AES-256-GCM 密文（iv.tag.cipher base64），非明文
-    teamShortId: text("team_short_id").notNull(),
-    teamFullId: text("team_full_id").notNull(),
-    seed: integer("seed").notNull(),
-    years: integer("years").notNull(), // 3 | 5
-    status: text("status").notNull().default("PENDING"), // PENDING RUNNING PAUSED DONE CANCELLED ERROR
-    stage: text("stage").notNull().default("SEASON"), // SEASON DRAFT FREE_AGENCY DONE
-    seasonsDone: integer("seasons_done").notNull().default(0),
-    turnIndex: integer("turn_index").notNull().default(0),
-    strategy: text("strategy"),
-    // 统计
-    callCount: integer("call_count").notNull().default(0),
-    actionCount: integer("action_count").notNull().default(0),
-    legalCount: integer("legal_count").notNull().default(0),
-    errorCount: integer("error_count").notNull().default(0),
-    latencyMsSum: integer("latency_ms_sum").notNull().default(0),
-    tokensIn: integer("tokens_in").notNull().default(0),
-    tokensOut: integer("tokens_out").notNull().default(0),
-    costCents: integer("cost_cents").notNull().default(0),
-    score: text("score", { mode: "json" }).$type<Record<string, unknown> | null>(),
-    replayOf: text("replay_of"),
-    error: text("error"),
-    createdAt: text("created_at").notNull(),
-    updatedAt: text("updated_at").notNull(),
-    finishedAt: text("finished_at"),
-  },
-  (t) => [index("eval_created_idx").on(t.createdAt)],
-);
-
-export const evalTurns = sqliteTable(
-  "eval_turns",
-  {
-    id: text("id").primaryKey(),
-    evaluationId: text("evaluation_id").notNull(),
-    turnIndex: integer("turn_index").notNull(),
-    stage: text("stage").notNull(),
-    at: text("at").notNull(),
-    action: text("action").notNull(),
-    params: text("params", { mode: "json" }).$type<Record<string, unknown> | null>(),
-    decision: text("decision"),
-    goals: text("goals"),
-    expected: text("expected"),
-    risks: text("risks"),
-    resultSummary: text("result_summary"),
-    ok: integer("ok", { mode: "boolean" }).notNull().default(true),
-    legal: integer("legal"),
-    latencyMs: integer("latency_ms").notNull().default(0),
-    tokensIn: integer("tokens_in").notNull().default(0),
-    tokensOut: integer("tokens_out").notNull().default(0),
-    costCents: integer("cost_cents").notNull().default(0),
-    error: text("error"),
-    rawResponse: text("raw_response"),
-  },
-  (t) => [index("eval_turns_idx").on(t.evaluationId, t.turnIndex)],
-);
-
-export const evalSeasons = sqliteTable(
-  "eval_seasons",
-  {
-    id: text("id").primaryKey(),
-    evaluationId: text("evaluation_id").notNull(),
-    season: integer("season").notNull(),
-    wins: integer("wins").notNull().default(0),
-    losses: integer("losses").notNull().default(0),
-    playoffResult: text("playoff_result").notNull().default("DNQ"), // DNQ R1 CONF_SEMI CONF_FINAL FINALS_LOSS CHAMPION
-    championTeamId: text("champion_team_id"),
-    championName: text("champion_name"),
-    note: text("note"),
-  },
-  (t) => [index("eval_seasons_idx").on(t.evaluationId, t.season)],
-);

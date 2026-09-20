@@ -146,11 +146,16 @@ export function buildRotation(team: SimTeam, rng: PRNG, opts: BuildRotationOpts 
     }
     const bi = benchIdx.get(p.id);
     let base = isStarter ? Math.max(ROLE_BASE_MINUTES[p.role] ?? 12, 32.5) : bi != null && bi < BENCH_LADDER.length ? BENCH_LADDER[bi] : 1.5;
+    // A STAR squeezed out of the starting five (two same-position stars, or a
+    // midseason acquisition behind an entrenched starter) still plays real
+    // starter minutes — think Booker behind SGA or a super-sixth-man.
+    if (!isStarter && (p.role === "STAR" || p.ratings.overall >= 84)) base = Math.max(base, 28);
     // Playoff rotations tighten: more for the top, less for the deep bench.
     if (playoff) base = isStarter ? base + 1.5 : bi === 0 ? base + 1 : base * 0.75;
     // Fatigue = load management: starters lose minutes faster than bench
-    // players, so a tired team spreads the load (and gets worse).
-    const staminaF = isStarter ? 0.87 + 0.13 * p.stamina : 0.93 + 0.07 * p.stamina;
+    // players, so a tired team spreads the load (and gets worse). Stars carry
+    // their minutes deeper into fatigue than ordinary starters do.
+    const staminaF = p.role === "STAR" ? 0.92 + 0.08 * p.stamina : isStarter ? 0.87 + 0.13 * p.stamina : 0.93 + 0.07 * p.stamina;
     // Back-to-backs push the same direction: stars get lighter nights.
     const b2bF = b2b ? (isStarter ? 0.94 : 1.0) : 1;
     const plan = base * staminaF * b2bF;
@@ -393,7 +398,7 @@ export function simulateGame(
       const p = s.player;
       // Star-driven usage: overall + real scoring share concentrate attempts.
       // An 89-OVR high-usage player should dwarf an end-of-bench body ~3-4x.
-      let w = Math.max(0.5, (p.ratings.overall - 66) * 0.22) + p.usageTendency * 12;
+      let w = Math.max(0.5, (p.ratings.overall - 66) * 0.24) + p.usageTendency * 13;
       if (clutch && (p.role === "STAR" || p.ratings.overall >= 85)) w *= 1.7; // stars demand the ball late
       if (!clutch && Math.abs(margin) > 22) w *= 0.8; // stars rest mentally in blowouts
       w *= tire(s) * (0.9 + 0.1 * p.stamina);

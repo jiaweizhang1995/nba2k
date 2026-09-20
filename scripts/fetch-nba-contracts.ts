@@ -16,10 +16,13 @@ const UA = "HARDWOOD-GM-Importer/1.0 (local simulation game; factual contract im
 const SEASON = 2027; // ESPN season key for the 2026-27 campaign
 
 // ESPN team ids verified against each roster's displayName on 2026-09-13.
+// Must cover every abbr in the payload — a missing entry means that team's
+// players silently end up with no contract at all (UTA/26 was dropped here
+// once and the whole Jazz roster imported as rating-derived placeholders).
 const ESPN_TEAM_IDS: Record<string, number> = {
   ATL: 1, BOS: 2, NOP: 3, CHI: 4, CLE: 5, DAL: 6, DEN: 7, DET: 8, GSW: 9, HOU: 10,
   IND: 11, LAC: 12, LAL: 13, MIA: 14, MIL: 15, MIN: 16, BKN: 17, NYK: 18, ORL: 19, PHI: 20,
-  PHX: 21, POR: 22, SAC: 23, SAS: 24, OKC: 25, WAS: 27, TOR: 28, MEM: 29, CHA: 30,
+  PHX: 21, POR: 22, SAC: 23, SAS: 24, OKC: 25, UTA: 26, WAS: 27, TOR: 28, MEM: 29, CHA: 30,
 };
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -112,6 +115,10 @@ async function main() {
     const list = byAbbr.get(p.teamAbbr) ?? [];
     list.push(p);
     byAbbr.set(p.teamAbbr, list);
+  }
+  const unmapped = [...byAbbr.keys()].filter((abbr) => !(abbr in ESPN_TEAM_IDS));
+  if (unmapped.length) {
+    throw new Error(`ESPN_TEAM_IDS 缺少球队 ${unmapped.join("、")}：这些队的球员会全部被导入为无合同占位，先补映射再抓取`);
   }
 
   // 1) ESPN rosters → athlete ids, matched to payload players

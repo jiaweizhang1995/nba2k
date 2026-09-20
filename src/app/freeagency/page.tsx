@@ -3,9 +3,10 @@
 // Free agency: market list, offer builder, AI competition, phase controls.
 
 import { useCallback, useEffect, useState } from "react";
-import { api, useSave } from "@/components/save-context";
+import { api, useSave, PHASE_LABEL } from "@/components/save-context";
 import { Section, Toast } from "@/components/ui";
-import { CBA } from "@/domain/salary";
+import Link from "next/link";
+import { seasonMoney } from "@/domain/salary";
 
 interface FaPlayer {
   id: string;
@@ -28,7 +29,7 @@ export default function FreeAgencyPage() {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<{ accepted: boolean; reason?: string; interest?: number; reasons?: string[] } | null>(null);
   const [toast, setToast] = useState<{ msg: string; kind: "ok" | "err" } | null>(null);
-  const isGod = !!summary?.save.godMode;
+
 
   const load = useCallback(async () => {
     if (!saveId) return;
@@ -67,7 +68,7 @@ export default function FreeAgencyPage() {
     try {
       await api(`/api/saves/${saveId}/fa?action=${action}`, { method: "POST", body: JSON.stringify({ playerId: "x", years: 1, avgSalary: 1 }) });
       setToast({ msg: label, kind: "ok" });
-      await refresh();
+      await Promise.all([load(), refresh()]);
     } catch (e) {
       setToast({ msg: (e as Error).message, kind: "err" });
     } finally {
@@ -78,6 +79,8 @@ export default function FreeAgencyPage() {
   if (!summary) return <div className="text-[13px] text-[var(--text-dim)] p-4">加载中…</div>;
   const phase = summary.save.phase;
   const capSpace = summary.cap.capSpace;
+  const money = seasonMoney(summary.save.season);
+  const inSeason = phase === "REGULAR_SEASON";
 
   return (
     <div className="grid lg:grid-cols-3 gap-4 items-start">
@@ -86,15 +89,13 @@ export default function FreeAgencyPage() {
           title={`自由球员市场（${fas.length} 人）`}
           right={
             phase === "DRAFT" ? (
-              <button className="btn btn-primary" disabled={busy} onClick={() => phaseAction("startFreeAgency", "自由市场已开启")}>
-                选秀已结束，开启自由市场
-              </button>
+              <Link className="btn btn-primary" href="/draft">先完成选秀</Link>
             ) : phase === "FREE_AGENCY" ? (
               <button className="btn btn-primary" disabled={busy} onClick={() => phaseAction("startNewSeason", "新赛季已开始")}>
                 结束市场，开始新赛季
               </button>
             ) : (
-              <span className="tag">当前阶段：{phase}</span>
+              <span className="tag">当前阶段：{PHASE_LABEL[phase] ?? phase}</span>
             )
           }
         >
@@ -113,7 +114,7 @@ export default function FreeAgencyPage() {
               </thead>
               <tbody>
                 {fas.map((p) => (
-                  <tr key={p.id} onClick={() => { setSelected(p); setYears(p.askingYears); setSalary(Math.max(CBA.minimumSalary, Math.min(p.askingSalary, Math.max(CBA.minimumSalary, capSpace > 0 ? p.askingSalary : 12.8)))); }} style={{ cursor: "pointer", background: selected?.id === p.id ? "#1d2b4a" : undefined }}>
+                  <tr key={p.id} onClick={() => { setSelected(p); setResult(null); setYears(inSeason ? 1 : p.askingYears); setSalary(inSeason ? money.minimumSalary : p.askingSalary); }} style={{ cursor: "pointer", background: selected?.id === p.id ? "#1d2b4a" : undefined }}>
                     <td className="font-medium">{p.name}</td>
                     <td>{p.position}</td>
                     <td>{p.age}</td>
@@ -138,8 +139,8 @@ export default function FreeAgencyPage() {
 
       <div className="space-y-4">
         <Section title="报价">
-          {phase !== "FREE_AGENCY" && phase !== "OFFSEASON" ? (
-            <div className="text-[12px] text-[var(--text-dim)]">当前不在自由市场阶段。完成赛季推进进入休赛期后可签约。</div>
+          {phase !== "FREE_AGENCY" && !inSeason ? (
+            <div className="text-[12px] text-[var(--text-dim)]">常规赛或自由市场阶段可签约。</div>
           ) : !selected ? (
             <div className="text-[12px] text-[var(--text-dim)]">在左侧列表选择一名自由球员。</div>
           ) : (
@@ -153,22 +154,22 @@ export default function FreeAgencyPage() {
               <div className="text-[12px] text-[var(--text-dim)]">要价 {selected.askingSalary.toFixed(1)}M × {selected.askingYears} 年</div>
               <div>
                 <label className="text-[12px] text-[var(--text-dim)] block mb-1">年薪（M）</label>
-                <input className="input" type="number" step="0.5" min="1.2" max="70" value={salary} onChange={(e) => setSalary(Number(e.target.value))} />
+                <input className="input" type="number" step="0.01" min={money.minimumSalary} disabled={inSeason} value={salary} onChange={(e) => setSalary(Number(e.target.value))} />
               </div>
               <div>
                 <label className="text-[12px] text-[var(--text-dim)] block mb-1">年限</label>
-                <input className="input" type="number" min="1" max="5" value={years} onChange={(e) => setYears(Number(e.target.value))} />
+                <input className="input" type="number" min="1" max="5" disabled={inSeason} value={inSeason ? 1 : years} onChange={(e) => setYears(Number(e.target.value))} />
               </div>
               <div className="text-[11px] text-[var(--text-dim)] leading-relaxed panel-2 p-2">
-                当前薪资空间 {capSpace > 0 ? `${capSpace.toFixed(1)}M` : "无（超帽）"}。超帽时可使用中产/底薪特例；超过第二土豪线（{CBA.secondApron}M）只能签底薪。
-                球员是否接受由其兴趣度计算：金额、球队实力、位置契合与竞争报价均有影响。
+                {inSeason ? `本游戏赛季中补强使用剩余赛季底薪合同（${money.minimumSalary.toFixed(2)}M、1 年）。` : `当前薪资空间 ${capSpace > 0 ? `${capSpace.toFixed(1)}M` : "无（超帽）"}。中产上限 ${money.midLevelException.toFixed(2)}M，第二土豪线 ${money.secondApron.toFixed(2)}M。母队球员可通过鸟权续约。`}
+                球员是否接受还取决于球队实力、位置契合与竞争报价。
               </div>
               <button className="btn btn-primary w-full" onClick={offer} disabled={busy}>
                 {busy ? "谈判中…" : "提交报价"}
               </button>
               {result && !result.accepted && (
                 <div className="panel-2 p-2.5 text-[12px] text-[var(--bad)] leading-relaxed">
-                  报价被拒{result.interest != null ? `（兴趣度 ${result.interest}/100，需 ≥ 62）` : ""}
+                  报价被拒{result.interest != null && result.interest > 0 ? `（兴趣度 ${result.interest}/100，需 ≥ ${inSeason ? 45 : 62}）` : ""}
                   {result.reason ? <div className="text-[var(--text-dim)] mt-1">{result.reason}</div> : null}
                 </div>
               )}
@@ -176,13 +177,7 @@ export default function FreeAgencyPage() {
           )}
         </Section>
 
-        {isGod && (
-          <Section title="GOD MODE">
-            <button className="btn btn-god w-full" disabled={busy} onClick={() => phaseAction("startFreeAgency", "GOD：强制开启自由市场")}>
-              强制进入自由市场
-            </button>
-          </Section>
-        )}
+
       </div>
 
       {toast && <Toast message={toast.msg} kind={toast.kind} />}

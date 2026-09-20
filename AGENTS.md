@@ -10,4 +10,4 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 
 ## Playing the game as an agent
 
-To play this NBA GM simulator yourself via the AGENT eval provider (5-year scored run), read `docs/agent-playbook.md` — it has the CLI loop, action schema, stage rules, and hard-won pitfalls (draft two-step, Feb-6 deadline, 140% extension trap, bird rights).
+To play this NBA GM simulator yourself, use the `nba-gm` MCP server (`.devin/mcp_config.json` → `scripts/mcp-gm-server.ts`) — it drives **real saves** through `src/server/engine.ts` directly. `gm_observe`/`gm_teams`/`gm_roster`/`gm_find`/`gm_pool`/`gm_picks`/`gm_resolve`/`gm_events`/`gm_saves`/`gm_status` are read-only, `gm_act` executes one validated action with name→ID resolution (`preview_trade` dry-runs a trade without executing — use it before `propose_trade`), `gm_auto` advances until a decision checkpoint, `gm_use`/`gm_new`/`gm_delete` manage saves. For rules and pitfalls (draft two-step, Feb-6 deadline, 140% extension trap, bird rights), read `docs/agent-playbook.md`.

@@ -7,7 +7,7 @@ import { seedDefaultRealSave } from "../src/server/seed";
 import { listSaves } from "../src/server/engine";
 
 async function main() {
-  const existing = listSaves().filter((s) => !s.isEval && s.name.startsWith("真实 NBA"));
+  const existing = listSaves().filter((s) => s.name.startsWith("真实 NBA"));
   if (existing.length > 0) {
     console.log(`已存在默认真实数据存档「${existing[0].name}」，跳过。`);
     return;

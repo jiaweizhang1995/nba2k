@@ -1,11 +1,11 @@
-// League CBA parameters — FICTIONAL LEAGUE RULES ("LEAGUE CBA v1.0").
-// These are the in-game rules of this original simulation league, versioned
-// and shown in the UI. They are simplified but internally consistent.
+// NBA-based simulation rules. Monetary anchors use the official 2026-27
+// release; exceptions and roster accounting remain simplified.
+// https://www.nba.com/news/nba-salary-cap-2026-27-season
 
 import type { Contract } from "./types";
 import type { PlayerRow } from "@/db/schema";
 
-export const CBA_VERSION = "LEAGUE CBA v1.1";
+export const CBA_VERSION = "NBA-SIM CBA v1.2";
 
 export interface CbaParams {
   version: string;
@@ -18,7 +18,7 @@ export interface CbaParams {
   minRosterSize: number;
   offseasonRosterMax: number;
   maxContractYears: number;
-  maxSalaryPct: { under9: number; nineTo18: number; over18: number }; // years of service -> 30/35/40% of cap
+  maxSalaryPct: { upTo6: number; sevenTo9: number; tenPlus: number }; // standard max: 0–6 / 7–9 / 10+ years of service
   rookieScale: { pick1Round1: number; pick15Round1: number; pick30Round1: number; round2Min: number };
   minimumSalary: number;
   tradeBand1: number; // team under cap: incoming <= 150% + 100k
@@ -31,18 +31,18 @@ export interface CbaParams {
 
 export const CBA: CbaParams = {
   version: CBA_VERSION,
-  salaryCap: 140,
-  luxuryTax: 170,
-  firstApron: 178,
-  secondApron: 188,
-  minTeamSalary: 126,
+  salaryCap: 164.961,
+  luxuryTax: 200.428,
+  firstApron: 209.015,
+  secondApron: 221.686,
+  minTeamSalary: 148.465,
   maxRosterSize: 18, // v1.1: 15 standard + 3 two-way slots (matches real roster structure)
   minRosterSize: 13,
   // Offseason (draft + free agency) may carry up to 20 — real NBA allows 21.
   // The 18-man limit is enforced again when the regular season starts.
   offseasonRosterMax: 20,
   maxContractYears: 5,
-  maxSalaryPct: { under9: 0.3, nineTo18: 0.35, over18: 0.4 },
+  maxSalaryPct: { upTo6: 0.25, sevenTo9: 0.3, tenPlus: 0.35 },
   rookieScale: { pick1Round1: 12.5, pick15Round1: 4.6, pick30Round1: 2.6, round2Min: 1.2 },
   minimumSalary: 1.2,
   tradeBand1: 1.5,
@@ -53,7 +53,7 @@ export const CBA: CbaParams = {
   tradeDeadlineDay: 110,
 };
 
-/** Cap economics grow ~7%/yr like the real league — a 5-year max signed in
+/** Future seasons project 7%/yr (a simulation assumption, not an NBA forecast) — a 5-year max signed in
  * 2027 should NOT still be a max-sized burden in 2031. All money lines scale
  * together so relative distances (cap/tax/aprons) stay constant. */
 export const CBA_BASE_SEASON = 2027;
@@ -78,7 +78,7 @@ export function seasonMoney(season: number = CBA_BASE_SEASON): SeasonMoney {
     secondApron: round2(CBA.secondApron * g),
     minTeamSalary: round2(CBA.minTeamSalary * g),
     minimumSalary: round2(CBA.minimumSalary * g),
-    midLevelException: round2(12.8 * g),
+    midLevelException: round2(15.044 * g),
   };
 }
 
@@ -175,7 +175,7 @@ export function salaryMatching(outgoing: number, incoming: number, teamSnapshot:
 }
 
 export function maxContractValue(yearsOfService: number, years: number, season: number = CBA_BASE_SEASON): { total: number; firstYear: number } {
-  const pct = yearsOfService < 9 ? CBA.maxSalaryPct.under9 : yearsOfService < 18 ? CBA.maxSalaryPct.nineTo18 : CBA.maxSalaryPct.over18;
+  const pct = yearsOfService <= 6 ? CBA.maxSalaryPct.upTo6 : yearsOfService <= 9 ? CBA.maxSalaryPct.sevenTo9 : CBA.maxSalaryPct.tenPlus;
   const firstYear = round2(seasonMoney(season).salaryCap * pct);
   return { firstYear, total: round2(firstYear * years) };
 }

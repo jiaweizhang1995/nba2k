@@ -20,9 +20,7 @@ import {
   dataSources as dataSourcesT,
   awards as awardsT,
   godSnapshots as godSnapshotsT,
-  evaluations as evaluationsT,
-  evalTurns as evalTurnsT,
-  evalSeasons as evalSeasonsT,
+  chatMessages as chatMessagesT,
   type SaveRow,
 } from "@/db/schema";
 import { generateDemoLeague, DEMO_PROVIDER, DEMO_LICENSE, demoSource } from "@/data/demo";
@@ -35,7 +33,7 @@ import { validateTrade, generateTradeOffers, TRADE_RULES_VERSION, aiEvaluateTrad
 import { computeChemistry, CHEMISTRY_VERSION } from "@/domain/chemistry";
 import { runLottery, aiDraftPick, prospectRookieContract, generateScoutingReport, registerProspectRatings, generateDraftClass, type DraftProspect } from "@/domain/draft";
 import { hashSeed, rngFor } from "@/domain/rng";
-import { canAfford, evaluateOffer, aiCompetitionLevel, suggestedContract, askingSalaryFor, isRestrictedFa } from "@/domain/freeagency";
+import { canAfford, evaluateOffer, aiCompetitionLevel, suggestedContract, askingSalaryFor, isRestrictedFa, extensionTerms } from "@/domain/freeagency";
 import { classifyTeamPhase } from "@/domain/aiGm";
 import type { SeasonPhase, TradeParty, DevelopmentState } from "@/domain/types";
 
@@ -334,14 +332,7 @@ export function deleteSave(saveId: string) {
     tx.delete(dataSourcesT).where(eq(dataSourcesT.saveId, saveId)).run();
     tx.delete(awardsT).where(eq(awardsT.saveId, saveId)).run();
     tx.delete(godSnapshotsT).where(eq(godSnapshotsT.saveId, saveId)).run();
-    // Eval rows reference the save via evaluations.saveId — turn/season rows
-    // hang off the evaluation, so clear children first (no FKs to help us).
-    const evalRows = tx.select({ id: evaluationsT.id }).from(evaluationsT).where(eq(evaluationsT.saveId, saveId)).all();
-    for (const e of evalRows) {
-      tx.delete(evalTurnsT).where(eq(evalTurnsT.evaluationId, e.id)).run();
-      tx.delete(evalSeasonsT).where(eq(evalSeasonsT.evaluationId, e.id)).run();
-    }
-    tx.delete(evaluationsT).where(eq(evaluationsT.saveId, saveId)).run();
+    tx.delete(chatMessagesT).where(eq(chatMessagesT.saveId, saveId)).run();
     tx.delete(saves).where(eq(saves.id, saveId)).run();
   });
 }
@@ -545,7 +536,7 @@ export function persistState(state: LeagueState, extra?: { phaseState?: Record<s
 // Simulation advancement
 // ---------------------------------------------------------------------------
 
-export type AdvanceMode = "NEXT_GAME" | "DAY" | "WEEK" | "MONTH" | "REGULAR_SEASON" | "PLAYOFFS" | "SEASON";
+export type AdvanceMode = "NEXT_GAME" | "DAY" | "WEEK" | "MONTH" | "REGULAR_SEASON" | "PLAYOFFS" | "PLAYOFF_ROUND" | "SEASON";
 
 export interface UserGameSummary {
   gameId: string;
@@ -614,10 +605,21 @@ export function advanceSim(saveId: string, mode: AdvanceMode, marketDiag?: Recor
   const phaseState = getPhaseState(saveId);
   const userTeamId = phaseState.userTeamId ? shortId(String(phaseState.userTeamId)) : null;
   const maxDays =
-    mode === "NEXT_GAME" ? 10 : mode === "DAY" ? 1 : mode === "WEEK" ? 7 : mode === "MONTH" ? 30 : mode === "REGULAR_SEASON" ? 240 : mode === "PLAYOFFS" ? 120 : 420;
+    mode === "NEXT_GAME" ? 10 : mode === "DAY" ? 1 : mode === "WEEK" ? 7 : mode === "MONTH" ? 30 : mode === "REGULAR_SEASON" ? 240 : mode === "PLAYOFFS" ? 120 : mode === "PLAYOFF_ROUND" ? 45 : 420;
 
   const result: AdvanceResult = { days: 0, gamesPlayed: 0, results: [], injuries: [], phaseChanged: null, champion: null, notes: [], awards: [], userGames: [], fatigueChanges: [] };
   const startPhase = state.phase;
+
+  // PLAYOFF_ROUND: sim until the earliest unfinished round completes (next
+  // round's series are created the same day by maybeAdvanceRound, so "no
+  // unfinished series of startRound left" is the stop signal).
+  const ROUND_ORDER = ["R1", "CONF_SEMI", "CONF_FINAL", "FINALS"];
+  const startRound =
+    mode === "PLAYOFF_ROUND" && state.phase === "PLAYOFFS" && state.playoffs
+      ? state.playoffs.series
+          .filter((s) => !s.done)
+          .sort((a, b) => ROUND_ORDER.indexOf(a.round) - ROUND_ORDER.indexOf(b.round))[0]?.round ?? null
+      : null;
 
   // Fatigue snapshot for the user's roster (NEXT_GAME reports stamina deltas).
   const staminaBefore = new Map<string, number>();
@@ -637,11 +639,14 @@ export function advanceSim(saveId: string, mode: AdvanceMode, marketDiag?: Recor
   const playedGameIds: string[] = [];
   for (let i = 0; i < maxDays; i++) {
     if (mode === "REGULAR_SEASON" && state.phase !== "REGULAR_SEASON") break;
-    if (mode === "PLAYOFFS" && state.phase !== "PLAYOFFS") break;
+    if ((mode === "PLAYOFFS" || mode === "PLAYOFF_ROUND") && state.phase !== "PLAYOFFS") break;
     if (mode === "SEASON" && state.phase === "OFFSEASON") break;
     // Granular modes stop at phase boundaries so callers (eval agents) get a
     // fresh observation whenever the league context changes.
     if ((mode === "DAY" || mode === "WEEK" || mode === "MONTH") && state.phase !== startPhase) break;
+    if (mode === "PLAYOFF_ROUND" && startRound && state.playoffs) {
+      if (!state.playoffs.series.some((s) => s.round === startRound && !s.done)) break;
+    }
     const report = advanceDay(state);
     result.days++;
     result.gamesPlayed += report.gamesPlayed;
@@ -704,6 +709,16 @@ export function advanceSim(saveId: string, mode: AdvanceMode, marketDiag?: Recor
     }
   }
   result.phaseChanged = state.phase !== startPhase ? state.phase : null;
+
+  if (mode === "PLAYOFF_ROUND" && state.playoffs) {
+    const abbr = (id: string) => state.teams.find((t) => t.id === id)?.abbr ?? "?";
+    for (const s of state.playoffs.series.filter((x) => x.round === startRound && x.done)) {
+      result.notes.push(`季后赛 ${s.round}：${abbr(s.aTeamId)} ${s.winsA}-${s.winsB} ${abbr(s.bTeamId)}`);
+    }
+    const nextSeries = state.playoffs.series.filter((x) => !x.done);
+    const nextRound = nextSeries.sort((a, b) => ROUND_ORDER.indexOf(a.round) - ROUND_ORDER.indexOf(b.round))[0]?.round;
+    if (nextRound) result.notes.push(`下一轮：${nextRound}`);
+  }
 
   // User-team game summaries (box score → top performers + key reasons).
   if (userTeamId) {
@@ -969,19 +984,27 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
       p.contract = { ...p.contract, option: null };
       continue;
     }
+    // Options refer to the final INCLUDED year, exactly like player options.
+    // Handle them before the normal non-expiring-contract branch so they are
+    // decided before the option season, at its real salary (never a new year).
+    if (p.teamId && p.contract.option === "TO" && p.contract.years.length === 1 && p.contract.years[0].season === newSeason) {
+      if (p.teamId === userShort) {
+        toPending.push(stripId(p.id));
+        p.contract = { ...p.contract, option: null };
+      } else if (p.ratings.overall >= 66 || p.age <= 24) {
+        p.contract = { ...p.contract, option: null };
+        resigned++;
+      } else {
+        p.lastTeamId = p.teamId;
+        p.teamId = null;
+        p.status = "FREE_AGENT";
+        p.contract = { ...p.contract, years: [], option: null, type: "VETERAN" };
+        enteredFa++;
+      }
+      continue;
+    }
     if (end >= newSeason || !p.teamId) continue;
     if (p.teamId === userShort) {
-      // Team-option year on the user's roster: the GM exercises it — the
-      // asset stays one more year at the option salary (declining is just
-      // waiving, which the agent can still do during FA).
-      if (p.contract.option === "TO") {
-        const optSalary = p.contract.years[p.contract.years.length - 1]?.salary ?? seasonMoney(newSeason).minimumSalary;
-        p.contract = { ...p.contract, years: [{ season: newSeason, salary: optSalary }], option: null };
-        // The GM may still DECLINE the option during the offseason — mark the
-        // pending decision; declineOption releases him with no dead money.
-        toPending.push(p.id.includes(":") ? p.id.split(":").pop()! : p.id);
-        continue;
-      }
       p.lastTeamId = p.teamId;
       p.teamId = null;
       p.status = "FREE_AGENT";
@@ -990,25 +1013,6 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
     }
     const rng = rngFor(state.seed, `resign:${state.season}:${p.id}`);
     const overall = p.ratings.overall;
-    // Team options: AI exercises them for anyone still worth rostering —
-    // cheap controlled years are the whole point of rookie-scale deals.
-    if (p.contract.option === "TO") {
-      if (overall >= 66 || p.age <= 24) {
-        const optSalary = p.contract.years[p.contract.years.length - 1]?.salary ?? seasonMoney(newSeason).minimumSalary;
-        p.contract = { ...p.contract, years: [{ season: newSeason, salary: optSalary }], option: null };
-        resigned++;
-        continue;
-      }
-      // declined → UNRESTRICTED free agent (declining a rookie-scale option
-      // forfeits matching rights; the ROOKIE type would wrongly make him an
-      // RFA via isRestrictedFa).
-      p.lastTeamId = p.teamId;
-      p.teamId = null;
-      p.status = "FREE_AGENT";
-      p.contract = { ...p.contract, type: "VETERAN" };
-      enteredFa++;
-      continue;
-    }
     let keepProb = overall >= 85 ? 0.9 : overall >= 72 ? 0.8 : 0.62;
     // Apron reality: a team already over the second apron without him can't
     // pay his ask — the player walks (or takes the minimum). Disgruntled
@@ -1077,13 +1081,18 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
   // holder picks in the original team's slot (otherwise traded picks never
   // convey and makeDraftPick deadlocks on slots no pick row can fill).
   const db2 = getDb();
+  // A draft consumes the picks belonging to the season just completed: a pick
+  // labelled Y is the one used in the June draft that follows season Y, and the
+  // rookie then plays season Y+1. state.season is still Y at this point (it is
+  // only advanced to newSeason further down), so the draft year is newSeason-1.
+  const draftPickYear = newSeason - 1;
   // Resolve pick protections before building the order: if the original
   // team's slot lands inside the protected range, the pick does NOT convey —
   // the obligation shifts to next year (unprotected, per NBA convention).
   const protectedPicks = db2
     .select()
     .from(picksT)
-    .where(and(eq(picksT.saveId, state.saveId), eq(picksT.year, newSeason), eq(picksT.round, 1)))
+    .where(and(eq(picksT.saveId, state.saveId), eq(picksT.year, draftPickYear), eq(picksT.round, 1)))
     .all()
     .filter((r) => r.holderTeamId !== r.originalTeamId && r.protection?.type === "LOTTERY_TOP_X" && r.protection.x);
   for (const row of protectedPicks) {
@@ -1091,17 +1100,17 @@ function prepareDraft(state: LeagueState, result: AdvanceResult) {
     const slot = lotteryResult.indexOf(origShort) + 1;
     if (slot >= 1 && slot <= (row.protection?.x ?? 0)) {
       const shift = row.protection?.yearShift || 1;
-      db2.update(picksT).set({ year: newSeason + shift, protection: null }).where(eq(picksT.id, row.id)).run();
+      db2.update(picksT).set({ year: draftPickYear + shift, protection: null }).where(eq(picksT.id, row.id)).run();
       const holderAbbr = state.teams.find((t) => t.id === row.holderTeamId.split(":").slice(1).join(":"))?.abbr ?? row.holderTeamId;
       const origAbbr = state.teams.find((t) => t.id === origShort)?.abbr ?? origShort;
-      logEvent(state.saveId, "DRAFT", `保护条款生效：${origAbbr} 抽到第 ${slot} 顺位（前 ${row.protection?.x} 保护），选秀权归还原队；${holderAbbr} 顺延至 ${newSeason + shift} 年首轮（无保护）`, { pickId: row.id, slot });
+      logEvent(state.saveId, "DRAFT", `保护条款生效：${origAbbr} 抽到第 ${slot} 顺位（前 ${row.protection?.x} 保护），选秀权归还原队；${holderAbbr} 顺延至 ${draftPickYear + shift} 年首轮（无保护）`, { pickId: row.id, slot });
     }
   }
   const pickHolder = (round: number, origShort: string): string => {
     const row = db2
       .select({ holder: picksT.holderTeamId })
       .from(picksT)
-      .where(and(eq(picksT.saveId, state.saveId), eq(picksT.year, newSeason), eq(picksT.round, round), eq(picksT.originalTeamId, `${state.saveId}:${origShort}`)))
+      .where(and(eq(picksT.saveId, state.saveId), eq(picksT.year, draftPickYear), eq(picksT.round, round), eq(picksT.originalTeamId, `${state.saveId}:${origShort}`)))
       .get();
     return row ? row.holder.split(":").slice(1).join(":") : origShort;
   };
@@ -1494,7 +1503,7 @@ export function getDraftBoard(saveId: string) {
     heightCm: p.heightCm,
     weightKg: p.weightKg,
     ratings: p.ratings,
-    scouting: generateScoutingReport(p.id, save.seed),
+    scouting: generateScoutingReport(p.id, save.seed, p.ratings),
     source: p.source,
   }));
 }
@@ -1513,7 +1522,10 @@ export function makeDraftPick(saveId: string, opts: { prospectId?: string; simul
   if (save.phase !== "DRAFT") throw new EngineError("WRONG_PHASE", "当前不在选秀阶段");
   ensureDraftClass(saveId, save.seed, save.season);
   const order = getDraftOrder(saveId);
-  const donePicks = db.select().from(picksT).where(and(eq(picksT.saveId, saveId), eq(picksT.year, save.season), eq(picksT.status, "EXERCISED"))).all();
+  // Picks matched to this draft carry the season just completed (see the draft
+  // transition above); the prospect class is labelled with the new season.
+  const draftPickYear = save.season - 1;
+  const donePicks = db.select().from(picksT).where(and(eq(picksT.saveId, saveId), eq(picksT.year, draftPickYear), eq(picksT.status, "EXERCISED"))).all();
   const doneCount = donePicks.length;
   const nextSlot = order[doneCount];
   if (!nextSlot) throw new EngineError("DRAFT_DONE", "本届选秀已完成");
@@ -1527,7 +1539,7 @@ export function makeDraftPick(saveId: string, opts: { prospectId?: string; simul
     const rows = tx
       .select()
       .from(picksT)
-      .where(and(eq(picksT.saveId, saveId), eq(picksT.year, save.season), eq(picksT.round, slot.round), eq(picksT.holderTeamId, `${saveId}:${slot.holderTeamId}`), eq(picksT.status, "OWNED")))
+      .where(and(eq(picksT.saveId, saveId), eq(picksT.year, draftPickYear), eq(picksT.round, slot.round), eq(picksT.holderTeamId, `${saveId}:${slot.holderTeamId}`), eq(picksT.status, "OWNED")))
       .all();
     const target =
       (slot.originalTeamId ? rows.find((r) => r.originalTeamId === `${saveId}:${slot.originalTeamId}`) : undefined) ?? rows[0];
@@ -1548,7 +1560,7 @@ export function makeDraftPick(saveId: string, opts: { prospectId?: string; simul
         heightCm: p.heightCm,
         weightKg: p.weightKg,
         ratings: p.ratings,
-        scouting: generateScoutingReport(p.id, save.seed),
+        scouting: generateScoutingReport(p.id, save.seed, p.ratings),
         draftYear: p.draftYear ?? save.season,
       })) as DraftProspect[];
       for (const a of avail) registerProspectRatings(`${saveId}:${a.id}`, a.ratings as never);
@@ -1602,7 +1614,7 @@ export function makeDraftPick(saveId: string, opts: { prospectId?: string; simul
   logEvent(saveId, "DRAFT", `选秀：${picked.map((p) => `第 ${p.round} 轮第 ${p.pickNumber} 顺位 → ${p.prospect ?? "跳过"}`).join("；")}`, { picked }, { godMode: opts.godMode });
 
   // Finish draft when all exercised
-  const remaining = db.select().from(picksT).where(and(eq(picksT.saveId, saveId), eq(picksT.year, save.season), eq(picksT.status, "OWNED"))).all();
+  const remaining = db.select().from(picksT).where(and(eq(picksT.saveId, saveId), eq(picksT.year, draftPickYear), eq(picksT.status, "OWNED"))).all();
   if (remaining.length === 0) {
     startFreeAgency(saveId);
   }
@@ -1614,6 +1626,11 @@ export function startFreeAgency(saveId: string) {
   const db = getDb();
   const save = getSave(saveId);
   if (!save) throw new EngineError("NO_SAVE", "存档不存在");
+  if (save.phase !== "DRAFT") throw new EngineError("WRONG_PHASE", "只能在选秀完成后开启自由市场");
+  const unpicked = db.select({ id: picksT.id }).from(picksT).where(and(
+    eq(picksT.saveId, saveId), eq(picksT.year, save.season - 1), eq(picksT.status, "OWNED"),
+  )).get();
+  if (unpicked) throw new EngineError("DRAFT_INCOMPLETE", "请先完成选秀，再开启自由市场");
   db.transaction((tx) => {
     const undrafted = tx.select().from(playersT).where(and(eq(playersT.saveId, saveId), eq(playersT.status, "PROSPECT"))).all();
     for (const p of undrafted) {
@@ -1744,13 +1761,18 @@ export function runAiTradeMarket(saveId: string, diag?: Record<string, number>, 
   const used = new Set<string>();
   let trades = 0;
 
+  // A rebuilding team builds around its young franchise cornerstone instead
+  // of shopping him — high-OVR prime-age players are only available when
+  // they're disgruntled enough to demand out (satisfaction < 35 below).
+  const cornerstone = (p: TradePlayer) => p.ratings.overall >= 88 && p.age <= 27 && (p.satisfaction ?? 70) >= 35;
+
   for (const sRow of sellers) {
     if (trades >= tradeCap) break;
     if (used.has(sRow.id)) continue;
     const seller = toTradeTeam(saveId, shortOf(sRow.id));
     const vets = seller.players
       .filter((p) =>
-        !p.contract.noTrade && contractEndSeason(p.contract) >= season &&
+        !p.contract.noTrade && contractEndSeason(p.contract) >= season && !cornerstone(p) &&
         ((p.age >= 26 && p.ratings.overall >= 72) || ((p.satisfaction ?? 70) < 35 && p.ratings.overall >= 75)),
       )
       // Disgruntled players get shopped first — they're why the phone rings.
@@ -1771,7 +1793,7 @@ export function runAiTradeMarket(saveId: string, diag?: Record<string, number>, 
       if (needPremium(buyer, vet) <= 0) { bump("no_need"); continue; }
 
       const movable = buyer.players
-        .filter((p) => !p.contract.noTrade)
+        .filter((p) => !p.contract.noTrade && !cornerstone(p))
         .sort((a, b) => playerValue(a, season).value - playerValue(b, season).value);
       const firsts = buyer.picks
         .filter((pk) => pk.status === "OWNED" && pk.round === 1 && pk.originalTeamId === buyer.id && pk.year > season && pk.year <= season + CBA.pickTradeYears && (!pk.protection || pk.protection.type === "NONE"))
@@ -1882,14 +1904,13 @@ export function runAiTradeMarket(saveId: string, diag?: Record<string, number>, 
     if (!rng.chance(0.8)) bump("offer_no_call");
     else {
       const user = toTradeTeam(saveId, shortOf(userFullId));
-      const psNow = getPhaseState(saveId);
       let offerMade = false;
       for (const sRow of sellers) {
         if (used.has(sRow.id) || offerMade) continue;
         const seller = toTradeTeam(saveId, shortOf(sRow.id));
         const sellerVets = seller.players
           .filter((p) =>
-            !p.contract.noTrade && contractEndSeason(p.contract) >= season && needPremium(user, p) > 0 &&
+            !p.contract.noTrade && contractEndSeason(p.contract) >= season && !cornerstone(p) && needPremium(user, p) > 0 &&
             ((p.age >= 26 && p.ratings.overall >= 72) || ((p.satisfaction ?? 70) < 35 && p.ratings.overall >= 75)),
           )
           .sort((a, b) =>
@@ -1989,7 +2010,7 @@ export function runAiTradeMarket(saveId: string, diag?: Record<string, number>, 
           expiresOn: isoAddDays(save.currentDate, 4),
         };
         db.update(saves)
-          .set({ phaseState: { ...psNow, inboundOffers: [offer] } as never, updatedAt: now() })
+          .set({ phaseState: { ...getPhaseState(saveId), inboundOffers: [...((getPhaseState(saveId).inboundOffers as InboundOffer[] | undefined) ?? []), offer] } as never, updatedAt: now() })
           .where(eq(saves.id, saveId))
           .run();
         logEvent(saveId, "TRADE", `交易报价：${seller.abbr} 想用 ${vet.name} 换你的 ${asks.map((p) => p.name).join("、")}${userFirst ? " + 一枚首轮签" : ""}`, { offerId: offer.id });
@@ -2050,7 +2071,7 @@ export function runAiTradeMarket(saveId: string, diag?: Record<string, number>, 
               expiresOn: isoAddDays(save.currentDate, 4),
             };
             db.update(saves)
-              .set({ phaseState: { ...getPhaseState(saveId), inboundOffers: [offer] } as never, updatedAt: now() })
+              .set({ phaseState: { ...getPhaseState(saveId), inboundOffers: [...((getPhaseState(saveId).inboundOffers as InboundOffer[] | undefined) ?? []), offer] } as never, updatedAt: now() })
               .where(eq(saves.id, saveId))
               .run();
             logEvent(saveId, "TRADE", `交易报价：${buyer.abbr} 想收购你的 ${vet.name}，出价 ${pkg.map((p) => p.name).join("、")}${buyerFirst ? " + 一枚首轮签" : ""}`, { offerId: offer.id });
@@ -2651,6 +2672,8 @@ export function startNewSeason(saveId: string) {
     // The manager's rotation is multi-season intent — keep it. Stale starter
     // ids are validated per game in buildRotation and fall back to auto.
     if (prevPs.rotation) carried.rotation = prevPs.rotation;
+    // League-wide toggle set via tools/console — same multi-season intent.
+    if (prevPs.injuriesDisabled) carried.injuriesDisabled = prevPs.injuriesDisabled;
     // Dead money survives the season rollover — prune only fully-expired
     // entries (those below the new season), keep the rest on the books.
     if (prevPs.deadCap) {
@@ -2701,9 +2724,8 @@ export function submitFaOffer(saveId: string, playerId: string, years: number, a
 
   const team = toTradeTeam(saveId, userShort);
 
-  // In-season signings are rest-of-season minimum deals — that's all the CBA
-  // allows anyone to offer mid-year. The agent still picks WHO; the money
-  // question disappears (every suitor offers the same 1.2M).
+  // The simulation simplifies in-season signings to rest-of-season minimum
+  // deals. Actual NBA teams have additional contract and exception options.
   if (inSeason) {
     const rosterAfterInSeason = team.players.length + 1;
     if (rosterAfterInSeason > CBA.maxRosterSize) {
@@ -2987,6 +3009,35 @@ export function declineOption(saveId: string, playerId: string) {
 }
 
 /**
+ * Finalize a pending team option. The option year's salary is already on the
+ * books (set during the offseason transition); "exercising" simply removes the
+ * GM's right to decline, so the player counts as committed roster going forward.
+ */
+export function exerciseOption(saveId: string, playerId: string) {
+  const db = getDb();
+  const save = getSave(saveId);
+  if (!save) throw new EngineError("NO_SAVE", "存档不存在");
+  if (save.phase !== "DRAFT" && save.phase !== "FREE_AGENCY") {
+    throw new EngineError("WRONG_PHASE", "球队选项只能在休赛期（选秀/自由市场阶段）决定是否执行");
+  }
+  const ps = getPhaseState(saveId);
+  const key = `toPending:${save.season}`;
+  const pending = new Set<string>((ps[key] as string[] | undefined) ?? []);
+  if (!pending.has(playerId)) {
+    throw new EngineError("NO_OPTION", "该球员没有待决定的球队选项");
+  }
+  const userTeamId = String(ps.userTeamId ?? "");
+  const player = db.select().from(playersT).where(eq(playersT.id, `${saveId}:${playerId}`)).get();
+  if (!player || player.teamId !== userTeamId) {
+    throw new EngineError("NOT_OWNED", "该球员不在你的阵容中");
+  }
+  pending.delete(playerId);
+  db.update(saves).set({ phaseState: { ...ps, [key]: [...pending] } as never, updatedAt: now() }).where(eq(saves.id, saveId)).run();
+  logEvent(saveId, "ROSTER", `执行 ${player.name} 的球队选项（${player.contract.years[0]?.salary.toFixed(1) ?? "?"}M）`, { playerId });
+  return { exercised: player.name };
+}
+
+/**
  * In-season AI signings: teams thin on healthy bodies — or with a star on
  * the shelf for weeks — dip into the minimum-salary market. Contenders
  * shop; tankers don't bother. Mirrors the user's in-season signing lever.
@@ -3100,13 +3151,15 @@ export function extendContract(saveId: string, playerId: string, extraYears: num
   const yearsLeft = player.contract.years.length;
   if (yearsLeft < 1) throw new EngineError("NO_CONTRACT", "球员合同已到期——请走自由市场签约");
   if (yearsLeft > 2) throw new EngineError("NOT_EXTENDABLE", `合同还剩 ${yearsLeft} 年——还剩 ≤2 年时才可提前续约`);
-  if (extraYears < 1 || extraYears > CBA.maxContractYears) throw new EngineError("BAD_TERMS", `续约年限 1-${CBA.maxContractYears}`);
+  if (!Number.isInteger(extraYears) || extraYears < 1 || extraYears > CBA.maxContractYears) {
+    throw new EngineError("BAD_TERMS", `续约年限须为 1-${CBA.maxContractYears} 的整数（收到 ${extraYears}）`);
+  }
   if (yearsLeft + extraYears > CBA.maxContractYears + 1) {
     throw new EngineError("BAD_TERMS", `续约后总长 ${yearsLeft + extraYears} 年超过上限 ${CBA.maxContractYears + 1} 年`);
   }
   const money = seasonMoney(save.season);
-  if (avgSalary < money.minimumSalary - 0.001) {
-    throw new EngineError("BAD_TERMS", `低于本赛季底薪 ${money.minimumSalary.toFixed(1)}M`);
+  if (!Number.isFinite(avgSalary) || avgSalary < money.minimumSalary - 0.001) {
+    throw new EngineError("BAD_TERMS", `平均年薪须为不低于本赛季底薪 ${money.minimumSalary.toFixed(1)}M 的数值（收到 ${avgSalary}）`);
   }
   const playerMax = maxContractValue(player.yearsPro, 1, save.season).firstYear;
   if (avgSalary > playerMax + 0.001) {
@@ -3129,9 +3182,7 @@ export function extendContract(saveId: string, playerId: string, extraYears: num
 
   // The player's price: market asking with a security discount — unless he's
   // a young riser betting on himself, in which case it's full price.
-  const asking = askingSalaryFor(player.contract, player.yearsPro, player.ratings.overall, player.age, save.season);
-  const risingStar = player.age <= 25 && (player.ratings.potential ?? 0) > player.ratings.overall + 8;
-  const floor = asking * (risingStar ? 1.0 : 0.95);
+  const { asking, risingStar, floor } = extensionTerms(player, save.season);
   const askingYears = Math.max(1, Math.min(4, player.age >= 32 ? 2 : 4));
   if (avgSalary < floor - 0.001 || extraYears < Math.min(askingYears, 2)) {
     logEvent(saveId, "FA", `续约谈判破裂：${player.name} 方要 ${floor.toFixed(1)}M/年起、至少 ${Math.min(askingYears, 2)} 年`, { playerId });
@@ -3379,6 +3430,33 @@ export function godOp(saveId: string, op: string, params: Record<string, unknown
       }
       logEvent(saveId, "GOD", `GOD MODE：跳转阶段 → ${target}（推进 ${guard} 天）`, { target }, { godMode: true });
       return { ok: true, days: guard };
+    }
+    case "setInjuriesDisabled": {
+      // The flag already gated injury generation in the sim (loadLeagueState
+      // reads it back from phaseState, and it carries across seasons) — this
+      // op is the missing setter.
+      const disabled = params.disabled !== false;
+      const ps = getPhaseState(saveId);
+      if (disabled) ps.injuriesDisabled = true;
+      else delete ps.injuriesDisabled;
+      db.update(saves).set({ phaseState: ps as never, updatedAt: now() }).where(eq(saves.id, saveId)).run();
+      logEvent(saveId, "GOD", `GOD MODE：伤病生成已${disabled ? "关闭（本赛季起不再产生新伤病）" : "恢复"}`, { disabled }, { godMode: true });
+      return { ok: true, injuriesDisabled: disabled };
+    }
+    case "healAllInjuries": {
+      const hurt = db
+        .select()
+        .from(playersT)
+        .where(eq(playersT.saveId, saveId))
+        .all()
+        .filter((p) => p.injury || p.status === "INJURED");
+      db.transaction((tx) => {
+        for (const p of hurt) {
+          tx.update(playersT).set({ injury: null, status: "ACTIVE", stamina: 1 }).where(eq(playersT.id, p.id)).run();
+        }
+      });
+      logEvent(saveId, "GOD", `GOD MODE：清除全部伤病（${hurt.length} 人伤愈复出）`, { healed: hurt.map((p) => p.name).slice(0, 40) }, { godMode: true });
+      return { ok: true, healed: hurt.length };
     }
     case "undo": {
       const latest = db.select().from(godSnapshotsT).where(eq(godSnapshotsT.saveId, saveId)).orderBy(desc(godSnapshotsT.at), desc(sql`rowid`)).get();

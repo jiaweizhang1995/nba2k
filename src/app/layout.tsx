@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import type { ReactNode } from "react";
 import "./globals.css";
 import { SaveProvider } from "@/components/save-context";
 import { AppShell } from "@/components/app-shell";
@@ -8,7 +9,7 @@ export const metadata: Metadata = {
   description: "原创品牌职业篮球 GM 模拟器：交易、薪资管理、选秀、自由市场与赛季模拟（演示数据）",
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="zh-CN" className="h-full antialiased">
       <body className="min-h-full flex flex-col">

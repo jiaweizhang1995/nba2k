@@ -1,5 +1,5 @@
 // Trade engine: asset valuation, league rule validation, and AI GM verdicts.
-// Deterministic and pure. Rule params come from salary.ts (CBA v1.0).
+// Deterministic and pure. Rule params come from salary.ts (NBA-SIM CBA v1.2).
 
 import { CBA, capSnapshot, round2, salaryMatching, contractEndSeason, salaryForSeason, type CapSnapshot } from "./salary";
 import { rngFor } from "./rng";
@@ -200,6 +200,16 @@ export function validateTrade(proposal: TradeProposal, teams: TradeTeam[], seaso
       issues.push({ code: "NO_TEAM", severity: "BLOCKER", message: `球队不存在` });
       continue;
     }
+    // Phantom assets: an id that resolves to nothing in the registry (e.g. a
+    // FREE_AGENT-status player still listed under a team) must fail loudly —
+    // silently dropping it would skip its salary AND its roster slot.
+    for (const a of [...party.gives, ...party.receives]) {
+      const found = a.kind === "PLAYER" ? playerById.has(a.id) : pickById.has(a.id);
+      if (!found) {
+        issues.push({ code: "ASSET_NOT_FOUND", severity: "BLOCKER", message: `${team.abbr} 交易中的资产不存在或不可交易（${a.id}）` });
+      }
+    }
+
     type RegPlayer = TradePlayer & { ownerTeamId: string };
     type RegPick = TradePick & { ownerTeamId: string };
     const givePlayers = party.gives.filter((a) => a.kind === "PLAYER").map((a) => playerById.get(a.id)).filter((p): p is RegPlayer => !!p);
@@ -346,7 +356,7 @@ export function aiEvaluateTrade(
   const incoming = party.receives.map((a) => {
     if (a.kind === "PLAYER") {
       const p = findPlayerGlobally(a.id);
-      if (!p) return { name: "?", value: 0, breakdown: [] as string[] };
+      if (!p) return { name: `?(${a.id})`, value: 0, breakdown: [] as string[] };
       const base = playerValue(p, season);
       const premium = needPremium(team, p);
       if (premium > 0) {
@@ -359,7 +369,7 @@ export function aiEvaluateTrade(
       return base;
     }
     const pk = findPickGlobally(a.id);
-    if (!pk) return { name: "?", value: 0, breakdown: [] as string[] };
+    if (!pk) return { name: `?(${a.id})`, value: 0, breakdown: [] as string[] };
     const base = pickValue(pk, season);
     // Rebuilders covet future assets: a first is worth ~50% more to a team
     // stocking up for tomorrow than to a team trying to win today.
@@ -371,10 +381,10 @@ export function aiEvaluateTrade(
   const outgoing = party.gives.map((a) => {
     if (a.kind === "PLAYER") {
       const p = team.players.find((x) => x.id === a.id);
-      return p ? playerValue(p, season) : { name: "?", value: 0, breakdown: [] as string[] };
+      return p ? playerValue(p, season) : { name: `?(${a.id})`, value: 0, breakdown: [] as string[] };
     }
     const pk = team.picks.find((x) => x.id === a.id);
-    return pk ? pickValue(pk, season) : { name: "?", value: 0, breakdown: [] as string[] };
+    return pk ? pickValue(pk, season) : { name: `?(${a.id})`, value: 0, breakdown: [] as string[] };
   });
 
   const inV = incoming.reduce((a, v) => a + v.value, 0);

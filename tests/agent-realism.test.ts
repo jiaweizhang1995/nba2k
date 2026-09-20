@@ -17,12 +17,12 @@ import {
   getSave,
   listInboundOffers,
   listOfferSheets,
-  loadLeagueState,
   makeDraftPick,
   respondInboundOffer,
   respondOfferSheet,
   setRotation,
   startNewSeason,
+  startFreeAgency,
   submitFaOffer,
   validateTradeOnServer,
   waivePlayer,
@@ -35,6 +35,13 @@ import { CBA, maxContractValue, round2, seasonMoney } from "@/domain/salary";
 let saveId: string;
 let userShort: string;
 let starId: string;
+
+describe("phase integrity", () => {
+  it("cannot reopen free agency during the regular season", async () => {
+    const s = await createSave({ name: "phase guard", seed: 777002 });
+    expect(() => startFreeAgency(s.saveId)).toThrow(/选秀完成后/);
+  });
+});
 
 beforeAll(async () => {
   const s = await createSave({ name: "agent 真实性回归", seed: 777001 });
@@ -469,13 +476,13 @@ describe("team options can be declined for free", () => {
     const target = db.select().from(playersT).where(and(eq(playersT.saveId, s.saveId), eq(playersT.teamId, userFull))).all()
       .filter((p) => p.ratings.overall < 75)
       .sort((a, b) => a.ratings.overall - b.ratings.overall)[0];
-    // TO semantics: the option year is NOT in years[] — it's created on
-    // exercise. A last-year-expired contract with option=TO rolls over and
-    // gets auto-exercised, leaving the decision pending.
-    db.update(playersT).set({ contract: { ...target.contract, option: "TO", years: [{ season, salary: 9.5 }] } }).where(eq(playersT.id, target.id)).run();
+    // The option is the final INCLUDED year and must be decided before it
+    // starts, without adding an extra year or losing the actual option salary.
+    db.update(playersT).set({ contract: { ...target.contract, option: "TO", years: [{ season, salary: 8 }, { season: season + 1, salary: 9.5 }] } }).where(eq(playersT.id, target.id)).run();
     await advanceSim(s.saveId, "SEASON");
     const pending = (getPhaseState(s.saveId)[`toPending:${season + 1}`] as string[] | undefined) ?? [];
     expect(pending).toContain(target.id.split(":").pop()!);
+    expect(db.select().from(playersT).where(eq(playersT.id, target.id)).get()!.contract.years).toEqual([{ season: season + 1, salary: 9.5 }]);
     const { declineOption, deadCapEntries } = await import("@/server/engine");
     const before = deadCapEntries(s.saveId, userFull.split(":").pop()!);
     const r = declineOption(s.saveId, target.id.split(":").pop()!);
@@ -500,14 +507,16 @@ describe("pick protections actually protect", () => {
     db.update(teamsT).set({ wins: 60, losses: 22 }).where(eq(teamsT.saveId, s.saveId)).run();
     const orl = db.select().from(teamsT).where(and(eq(teamsT.saveId, s.saveId), eq(teamsT.abbr, "ORL"))).get()!;
     db.update(teamsT).set({ wins: 0, losses: 82 }).where(eq(teamsT.id, orl.id)).run();
-    // ORL owes its next first to BOS with lottery protection.
+    // ORL owes its next first to BOS with lottery protection. A pick labelled
+    // Y is used in the June draft right after season Y, so the pick due now
+    // carries `season`.
     const bos = db.select().from(teamsT).where(and(eq(teamsT.saveId, s.saveId), eq(teamsT.abbr, "BOS"))).get()!;
-    const pick = db.select().from(picksT).where(and(eq(picksT.saveId, s.saveId), eq(picksT.year, season + 1), eq(picksT.round, 1), eq(picksT.originalTeamId, orl.id))).get()!;
+    const pick = db.select().from(picksT).where(and(eq(picksT.saveId, s.saveId), eq(picksT.year, season), eq(picksT.round, 1), eq(picksT.originalTeamId, orl.id))).get()!;
     db.update(picksT).set({ holderTeamId: bos.id, protection: { type: "LOTTERY_TOP_X", x: 14, yearShift: 1 } }).where(eq(picksT.id, pick.id)).run();
     await advanceSim(s.saveId, "SEASON");
     const after = db.select().from(picksT).where(eq(picksT.id, pick.id)).get()!;
     // Protection triggered: obligation shifts a year, unprotected now.
-    expect(after.year).toBe(season + 2);
+    expect(after.year).toBe(season + 1);
     expect(after.protection).toBeNull();
     expect(after.holderTeamId).toBe(bos.id);
     expect(after.status).toBe("OWNED");
@@ -645,7 +654,7 @@ describe("mid-level exception is a single annual exception", () => {
   });
 
   it("an over-cap team gets ONE MLE — the second MLE-sized offer is rejected", () => {
-    const team = mkTeam(160); // over cap, under first apron
+    const team = mkTeam((seasonMoney().salaryCap + seasonMoney().firstApron) / 2); // over cap, under first apron
     expect(canAfford(team, 12, 15, 0, false).ok).toBe(true);
     expect(canAfford(team, 12, 15, 0, true).ok).toBe(false);
     // minimum deals still work after the MLE is spent
@@ -796,12 +805,11 @@ describe("inbound trade offers", () => {
       .run();
     expect(listInboundOffers(s.saveId).length).toBe(1);
 
-    // Advance to the deadline — the flag write must not clobber the pending offer.
-    for (let i = 0; i < 8; i++) {
-      await advanceSim(s.saveId, "MONTH");
-      const sv = getSave(s.saveId)!;
-      if ((sv.phaseState as Record<string, unknown>)[`deadlineMarket:${sv.season}`]) break;
-    }
+    // Cross the deadline write itself. Advancing four months after constructing
+    // this fixture lets unrelated AI signings/trades remove its assets.
+    db.update(savesT).set({ currentDate: `${season}-02-06` }).where(eq(savesT.id, s.saveId)).run();
+    advanceSim(s.saveId, "DAY");
+    expect(getPhaseState(s.saveId)[`deadlineMarket:${season}`]).toBe(true);
     const offers = listInboundOffers(s.saveId);
     expect(offers.length).toBeGreaterThanOrEqual(1);
     const offer = offers.find((o) => o.id === "inj-offer-1") ?? offers[0];

@@ -101,6 +101,9 @@ describe("Regular season progression", () => {
     // The previous test exercised this season's picks (empty class), so roll
     // the save one more year forward and draft against the next pick class.
     const season = save.season + 1;
+    // Prospects carry the upcoming season's label, but the draft consumes the
+    // picks of the season just completed — hence the pre-roll pick year.
+    const pickSeason = save.season;
     const mkRatings = (overall: number) => ({
       overall,
       inside: overall,
@@ -167,7 +170,7 @@ describe("Regular season progression", () => {
     const pickRows = db
       .select()
       .from(picksT)
-      .where(and(eq(picksT.saveId, saveId), eq(picksT.year, season)))
+      .where(and(eq(picksT.saveId, saveId), eq(picksT.year, pickSeason)))
       .all();
     const byRound = (r: number) =>
       pickRows

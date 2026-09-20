@@ -19,6 +19,23 @@ export interface FaPlayer {
   contract: Contract;
 }
 
+/** The same terms power the contract UI and the engine's acceptance rules. */
+export function extensionTerms(player: { contract: Contract; yearsPro: number; age: number; ratings: { overall: number; potential: number | null } }, season: number) {
+  const money = seasonMoney(season);
+  const lastSalary = player.contract.years.at(-1)?.salary ?? 0;
+  const asking = askingSalaryFor(player.contract, player.yearsPro, player.ratings.overall, player.age, season);
+  const risingStar = player.age <= 25 && (player.ratings.potential ?? 0) > player.ratings.overall + 8;
+  const floor = asking * (risingStar ? 1 : 0.95);
+  const cap = Math.min(maxContractValue(player.yearsPro, 1, season).firstYear, Math.max(lastSalary, money.salaryCap / 15) * 1.4);
+  return {
+    asking, floor, risingStar,
+    minimumSalary: money.minimumSalary,
+    maxSalary: Math.floor((cap + 0.000001) * 100) / 100,
+    suggestedSalary: Math.ceil(Math.max(floor, money.minimumSalary) * 100) / 100,
+    maxYears: Math.min(CBA.maxContractYears, CBA.maxContractYears + 1 - player.contract.years.length),
+  };
+}
+
 export interface OfferInput {
   years: number;
   avgSalary: number;

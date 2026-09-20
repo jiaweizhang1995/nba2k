@@ -31,7 +31,6 @@ const NAV_GROUPS: { label: string; items: { href: string; label: string; icon: s
     label: "更多",
     items: [
       { href: "/chemistry", label: "化学反应", icon: "♥" },
-      { href: "/eval", label: "AI 评测", icon: "★" },
       { href: "/log", label: "操作日志", icon: "⌗" },
       { href: "/settings", label: "设置与数据来源", icon: "⚙" },
       { href: "/", label: "存档管理", icon: "⌂" },

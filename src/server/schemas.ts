@@ -8,7 +8,7 @@ export const createSaveSchema = z.object({
 });
 
 export const advanceSchema = z.object({
-  mode: z.enum(["NEXT_GAME", "DAY", "WEEK", "MONTH", "REGULAR_SEASON", "PLAYOFFS", "SEASON"]),
+  mode: z.enum(["NEXT_GAME", "DAY", "WEEK", "MONTH", "REGULAR_SEASON", "PLAYOFFS", "PLAYOFF_ROUND", "SEASON"]),
 });
 
 export const rotationSchema = z.object({

@@ -25,6 +25,96 @@ interface Dashboard {
   pendingEvents: { title: string; actionLabel: string; actionHref: string }[];
 }
 
+interface DecisionData {
+  inboundOffers: { id: string; fromTeam: string; expiresOn?: string; giveNames: string[]; wantNames: string[] }[];
+  offerSheets: { id: string; playerId: string; playerName: string; fromTeamName: string; salary: number; years: number; expiresOn: string }[];
+  teamOptions: { id: string; name: string; salary: number }[];
+  extensions: { id: string; name: string; yearsLeft: number; asking: number; suggestedSalary: number; maxSalary: number; minimumSalary: number; maxYears: number }[];
+}
+
+function DecisionCenter({ saveId, refresh }: { saveId: string; refresh: () => Promise<void> }) {
+  const [data, setData] = useState<DecisionData | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
+  const [terms, setTerms] = useState<Record<string, { years: number; salary: number }>>({});
+
+  const load = useCallback(async () => {
+    try {
+      setData(await api<DecisionData>(`/api/saves/${saveId}/decisions`));
+    } catch (e) {
+      setMessage({ text: (e as Error).message, error: true });
+    }
+  }, [saveId]);
+  useEffect(() => { void load(); }, [load]);
+
+  const act = async (key: string, body: Record<string, unknown>) => {
+    setBusy(key);
+    setMessage(null);
+    try {
+      const response = await api<{ result: { extended?: boolean; accepted?: boolean; reason?: string } }>(`/api/saves/${saveId}/decisions`, { method: "POST", body: JSON.stringify(body) });
+      const refused = response.result.extended === false || (body.accept === true && response.result.accepted === false);
+      setMessage({ text: refused ? response.result.reason ?? "对方未接受，请调整条件。" : "决定已保存。", error: refused });
+      await Promise.all([load(), refresh()]);
+    } catch (e) {
+      setMessage({ text: (e as Error).message, error: true });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (!data) return message ? <div role="alert" className="panel-2 p-3 text-[var(--bad)] text-[12px]">球队决策加载失败：{message.text} <button className="btn" onClick={() => void load()}>重试</button></div> : null;
+  const total = data.inboundOffers.length + data.offerSheets.length + data.teamOptions.length;
+  const hasExtensionWindow = data.extensions.length > 0;
+  if (!total && !hasExtensionWindow && !message) return null;
+  return (
+    <Section title="待处理的球队决策" right={<span className="text-[11px] text-[var(--text-dim)]">决定会立即写入存档</span>}>
+      <div className="space-y-2">
+        {message && <div role="status" className={`panel-2 p-2 text-[12px] ${message.error ? "text-[var(--bad)]" : "text-[var(--good)]"}`}>{message.text}</div>}
+        {data.inboundOffers.map((o) => (
+          <div key={o.id} className="panel-2 px-3 py-2.5 flex items-center justify-between gap-3 flex-wrap">
+            <div className="min-w-0 text-[12px]">
+              <div className="font-semibold">{o.fromTeam} 的交易报价{o.expiresOn && <span className="font-normal text-[var(--text-dim)] ml-2">有效至 {o.expiresOn}</span>}</div>
+              <div className="text-[var(--text-dim)] mt-0.5">对方给：{o.giveNames.join("、") || "无"} · 想要：{o.wantNames.join("、") || "无"}</div>
+            </div>
+            <div className="flex gap-1.5 shrink-0">
+              <button className="btn btn-primary text-[11px] py-1" disabled={!!busy} onClick={() => void act(o.id, { action: "respondInboundOffer", offerId: o.id, accept: true })}>接受</button>
+              <button className="btn text-[11px] py-1" disabled={!!busy} onClick={() => void act(o.id, { action: "respondInboundOffer", offerId: o.id, accept: false })}>拒绝</button>
+            </div>
+          </div>
+        ))}
+        {data.offerSheets.map((s) => (
+          <div key={s.id} className="panel-2 px-3 py-2.5 flex items-center justify-between gap-3 flex-wrap">
+            <div className="text-[12px]"><span className="font-semibold">{s.playerName} 报价单</span><span className="text-[var(--text-dim)] ml-2">{s.fromTeamName} · {s.salary.toFixed(1)}M × {s.years} 年 · {s.expiresOn} 到期</span></div>
+            <div className="flex gap-1.5"><button className="btn btn-primary text-[11px] py-1" disabled={!!busy} onClick={() => void act(s.id, { action: "respondOfferSheet", sheetId: s.id, match: true })}>匹配</button><button className="btn text-[11px] py-1" disabled={!!busy} onClick={() => void act(s.id, { action: "respondOfferSheet", sheetId: s.id, match: false })}>放弃</button></div>
+          </div>
+        ))}
+        {data.teamOptions.map((p) => (
+          <div key={p.id} className="panel-2 px-3 py-2.5 flex items-center justify-between gap-3 flex-wrap">
+            <div className="text-[12px]"><span className="font-semibold">{p.name} 的球队选项</span><span className="text-[var(--text-dim)] ml-2">{p.salary.toFixed(1)}M</span></div>
+            <div className="flex gap-1.5"><button className="btn btn-primary text-[11px] py-1" disabled={!!busy} onClick={() => void act(p.id, { action: "exerciseOption", playerId: p.id })}>执行</button><button className="btn text-[11px] py-1" disabled={!!busy} onClick={() => void act(p.id, { action: "declineOption", playerId: p.id })}>放弃</button></div>
+          </div>
+        ))}
+        {hasExtensionWindow && (
+          <details className="pt-2 mt-1 border-t border-[#1a2440]">
+            <summary className="text-[12px] font-semibold mb-1 cursor-pointer">提前续约（{data.extensions.length} 人，合同剩 1–2 年）</summary>
+            {data.extensions.map((p) => {
+              const t = terms[p.id] ?? { years: 2, salary: Math.min(p.suggestedSalary, p.maxSalary) };
+              return <div key={p.id} className="flex items-center gap-2 flex-wrap py-1.5 text-[12px]">
+                <span className="font-medium min-w-28">{p.name}</span><span className="text-[var(--text-dim)]">剩 {p.yearsLeft} 年 · 要价 {p.asking.toFixed(2)}M / 上限 {p.maxSalary.toFixed(2)}M</span>
+                {p.suggestedSalary > p.maxSalary && <span className="text-[var(--warn)]">最低可接受报价超过续约上限，可等合同到期再谈</span>}
+                <input className="input w-20 text-[11px] py-1" type="number" min="1" max={p.maxYears} value={t.years} onChange={(e) => setTerms((m) => ({ ...m, [p.id]: { ...t, years: Number(e.target.value) } }))} aria-label={`${p.name}续约年限`} />
+                <input className="input w-24 text-[11px] py-1" type="number" min={p.minimumSalary} max={p.maxSalary} step="0.01" value={t.salary} onChange={(e) => setTerms((m) => ({ ...m, [p.id]: { ...t, salary: Number(e.target.value) } }))} aria-label={`${p.name}续约年薪`} />
+                <span className="text-[var(--text-dim)]">年 / M每年</span>
+                <button className="btn text-[11px] py-1" disabled={!!busy} onClick={() => void act(p.id, { action: "extendContract", playerId: p.id, extraYears: t.years, avgSalary: t.salary })}>谈续约</button>
+              </div>;
+            })}
+          </details>
+        )}
+      </div>
+    </Section>
+  );
+}
+
 export default function GmHome() {
   const { summary, saveId, refresh } = useSave();
   const [dash, setDash] = useState<Dashboard | null>(null);
@@ -130,6 +220,8 @@ export default function GmHome() {
               </div>
             </Section>
           )}
+
+          <DecisionCenter key={saveId} saveId={saveId!} refresh={load} />
 
           {/* 最近比赛结果与关键原因 */}
           <Section title="最近比赛 — 结果与原因" right={<Link href="/sim" className="text-[12px] text-[var(--accent)]">前往比赛推进 →</Link>}>

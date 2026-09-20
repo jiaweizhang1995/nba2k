@@ -55,10 +55,15 @@ const STRENGTH_POOL: Record<string, string[]> = {
 
 const COMPARISONS = ["技术型前锋", "传统护筐中锋", "双能卫", "3D侧翼", "组织前锋", "得分第一后卫", "蓝领内线"];
 
-/** Deterministic scouting report from ratings + seed. */
-export function generateScoutingReport(prospectId: string, seed: number): ScoutingReport {
+/** Deterministic scouting report from ratings + seed.
+ *
+ * `ratings` is accepted explicitly because the module cache is an optimization,
+ * not persisted save state. A freshly started process must show the same report
+ * as the process that generated the draft class.
+ */
+export function generateScoutingReport(prospectId: string, seed: number, ratings?: DraftProspect["ratings"]): ScoutingReport {
   const rng = rngFor(seed, `scout:${prospectId}`);
-  const r = prospectRatingsCache.get(prospectId);
+  const r = ratings ?? prospectRatingsCache.get(prospectId);
   const strengths: string[] = [];
   const weaknesses: string[] = [];
   if (r) {

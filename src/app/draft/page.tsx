@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, useSave } from "@/components/save-context";
 import { Section, Toast } from "@/components/ui";
+import { CBA_VERSION } from "@/domain/salary";
 
 interface Prospect {
   id: string;
@@ -90,7 +91,7 @@ export default function DraftPage() {
                   选择 {selected?.name ?? "（先在榜单选择新秀）"}
                 </button>
                 <button className="btn" disabled={busy} onClick={() => pick(undefined, true)}>
-                  模拟剩余选秀
+                  自动选择全部剩余顺位
                 </button>
               </div>
             ) : (
@@ -126,7 +127,7 @@ export default function DraftPage() {
                     <td colSpan={6} className="text-center text-[var(--text-dim)] py-6">
                       {doneCount > 0
                         ? "本届新秀已全部选择完毕"
-                        : "本届暂无新秀数据（真实存档不虚构新秀名单；可在「设置 → 数据导入」上传新秀 CSV）。选秀阶段仍可直接「模拟剩余选秀」完成流转。"}
+                        : "本届暂无可选新秀。选秀阶段会生成后续赛季的新秀池，请重新加载。"}
                     </td>
                   </tr>
                 )}
@@ -189,7 +190,7 @@ export default function DraftPage() {
               </tbody>
             </table>
           </div>
-          <div className="text-[11px] text-[var(--text-dim)] mt-2">规则：{`LEAGUE CBA v1.0 / DRAFT-RULES v1.0`} · 前 14 顺位乐透加权，首轮新秀按顺位拿新秀合同（含球队选项）。</div>
+          <div className="text-[11px] text-[var(--text-dim)] mt-2">规则：{CBA_VERSION} / DRAFT-RULES v1.0 · 乐透抽前 4 顺位，其余按战绩排序；首轮新秀按顺位拿新秀合同（含球队选项）。</div>
         </Section>
       </div>
 

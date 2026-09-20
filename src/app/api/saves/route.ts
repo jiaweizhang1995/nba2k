@@ -5,7 +5,7 @@ import { createSaveSchema } from "@/server/schemas";
 
 export async function GET() {
   try {
-    let saves = listSaves().filter((s) => !s.isEval);
+    let saves = listSaves();
     // Personal build: boot straight into the real NBA league on first run.
     if (saves.length === 0 && realPayloadExists() && process.env.NBA2K_NO_AUTOSEED !== "1") {
       await seedDefaultRealSave();
