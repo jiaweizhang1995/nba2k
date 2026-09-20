@@ -1,4 +1,4 @@
-# HARDWOOD GM
+# NBA2K
 
 一个可以直接运行的职业篮球经理模拟器。你可以管理一支 NBA 球队，进行交易、续约、选秀、自由市场操作，并推进多个赛季。
 
@@ -10,7 +10,7 @@ A browser-based basketball general manager simulator. Manage an NBA team, make t
 
 ```bash
 git clone https://github.com/jiaweizhang1995/nba2k.git
-cd hardwood-gm
+cd nba2k
 npm install
 npm run dev
 ```
